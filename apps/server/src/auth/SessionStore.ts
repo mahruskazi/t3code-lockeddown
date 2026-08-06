@@ -470,7 +470,7 @@ export const make = Effect.gen(function* () {
   const cookieName = resolveSessionCookieName({
     mode: serverConfig.mode,
     port: serverConfig.port,
-    host: serverConfig.host,
+    host: ServerConfig.LOOPBACK_HOST,
     instanceKey: serverConfig.stateDir,
     development: serverConfig.devUrl !== undefined,
   });

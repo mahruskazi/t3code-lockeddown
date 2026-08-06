@@ -10,59 +10,11 @@ import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySet
 import { createModelSelection } from "./model.ts";
 import {
   applyServerSettingsPatch,
-  extractPersistedServerObservabilitySettings,
   isModelSelectionProviderEnabled,
-  normalizePersistedServerSettingString,
-  parsePersistedServerObservabilitySettings,
   resolveSourceControlWriterModelSelection,
 } from "./serverSettings.ts";
 
 describe("serverSettings helpers", () => {
-  it("normalizes optional persisted strings", () => {
-    expect(normalizePersistedServerSettingString(undefined)).toBeUndefined();
-    expect(normalizePersistedServerSettingString("   ")).toBeUndefined();
-    expect(normalizePersistedServerSettingString("  http://localhost:4318/v1/traces  ")).toBe(
-      "http://localhost:4318/v1/traces",
-    );
-  });
-
-  it("extracts persisted observability settings", () => {
-    expect(
-      extractPersistedServerObservabilitySettings({
-        observability: {
-          otlpTracesUrl: "  http://localhost:4318/v1/traces  ",
-          otlpMetricsUrl: "  http://localhost:4318/v1/metrics  ",
-        },
-      }),
-    ).toEqual({
-      otlpTracesUrl: "http://localhost:4318/v1/traces",
-      otlpMetricsUrl: "http://localhost:4318/v1/metrics",
-    });
-  });
-
-  it("parses lenient persisted settings JSON", () => {
-    expect(
-      parsePersistedServerObservabilitySettings(
-        JSON.stringify({
-          observability: {
-            otlpTracesUrl: "http://localhost:4318/v1/traces",
-            otlpMetricsUrl: "http://localhost:4318/v1/metrics",
-          },
-        }),
-      ),
-    ).toEqual({
-      otlpTracesUrl: "http://localhost:4318/v1/traces",
-      otlpMetricsUrl: "http://localhost:4318/v1/metrics",
-    });
-  });
-
-  it("falls back cleanly when persisted settings are invalid", () => {
-    expect(parsePersistedServerObservabilitySettings("{")).toEqual({
-      otlpTracesUrl: undefined,
-      otlpMetricsUrl: undefined,
-    });
-  });
-
   it("replaces text generation selection when provider/model are provided", () => {
     const current = {
       ...DEFAULT_SERVER_SETTINGS,

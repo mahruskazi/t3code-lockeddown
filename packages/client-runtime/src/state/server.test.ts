@@ -32,15 +32,8 @@ import type { RpcSession } from "../rpc/session.ts";
 import {
   applyServerConfigProjection,
   makeEnvironmentServerConfigState,
-  isLegacyUpdateHandoffLoss,
-  matchesServerUpdateReadyEvent,
-  nudgeReconnectDuringUpdateRestart,
   projectServerWelcome,
   resolveServerConfigValue,
-  resolveServerUpdateProgressResult,
-  serverUpdateStateForProgressEvent,
-  serverUpdateStateForServerVersion,
-  validateServerUpdateReadyEvent,
 } from "./server.ts";
 
 const CONFIG = {
@@ -76,193 +69,11 @@ function session(client: WsRpcProtocolClient): RpcSession {
   };
 }
 
-describe("update restart reconnect nudges", () => {
-  it.effect("retries once per backoff entry instead of only the first", () =>
-    Effect.gen(function* () {
-      const retries = yield* Ref.make(0);
-      const states = [
-        { phase: "backoff" },
-        { phase: "connecting" },
-        { phase: "backoff" },
-        { phase: "backoff" },
-      ];
-
-      yield* nudgeReconnectDuringUpdateRestart({
-        stateChanges: Stream.fromIterable(states),
-        retryNow: Ref.update(retries, (count) => count + 1),
-        interval: Duration.zero,
-      });
-
-      // Three backoff entries, three nudges. The old one-shot behavior fired
-      // once and then let the supervisor's ladder stretch to 16-second gaps.
-      expect(yield* Ref.get(retries)).toBe(3);
-    }),
-  );
-
-  it.effect("paces nudges so a fast-failing connection cannot spin", () =>
-    Effect.gen(function* () {
-      const retries = yield* Ref.make(0);
-
-      const fiber = yield* Effect.forkChild(
-        nudgeReconnectDuringUpdateRestart({
-          stateChanges: Stream.fromIterable([{ phase: "backoff" }, { phase: "backoff" }]),
-          retryNow: Ref.update(retries, (count) => count + 1),
-        }),
-        { startImmediately: true },
-      );
-
-      // Each nudge waits out the interval first, so nothing fires immediately.
-      yield* TestClock.adjust(Duration.millis(999));
-      expect(yield* Ref.get(retries)).toBe(0);
-
-      yield* TestClock.adjust(Duration.millis(1));
-      expect(yield* Ref.get(retries)).toBe(1);
-
-      yield* TestClock.adjust(Duration.seconds(1));
-      expect(yield* Ref.get(retries)).toBe(2);
-
-      yield* Fiber.join(fiber);
-    }).pipe(Effect.provide(TestClock.layer())),
-  );
-});
-
 describe("server state projection", () => {
-  it("only treats a legacy transport interruption as an unacknowledged handoff", () => {
-    expect(isLegacyUpdateHandoffLoss(Cause.interrupt(1))).toBe(true);
-    expect(
-      isLegacyUpdateHandoffLoss(
-        Cause.fail(
-          new RpcClientError.RpcClientError({
-            reason: new Socket.SocketCloseError({ code: 1006 }),
-          }),
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      isLegacyUpdateHandoffLoss(
-        Cause.fail(
-          new RpcClientError.RpcClientError({
-            reason: new Socket.SocketOpenError({
-              kind: "Unknown",
-              cause: new Error("connection refused"),
-            }),
-          }),
-        ),
-      ),
-    ).toBe(false);
-    expect(
-      isLegacyUpdateHandoffLoss(
-        Cause.fail(
-          new RpcClientError.RpcClientError({
-            reason: new RpcClientError.RpcClientDefect({
-              message: "incompatible protocol",
-              cause: new Error("invalid response"),
-            }),
-          }),
-        ),
-      ),
-    ).toBe(false);
-    expect(isLegacyUpdateHandoffLoss(Cause.fail(new Error("Install failed.")))).toBe(false);
-  });
 
-  it.effect("resumes after the progress stream disconnects following completion", () => {
-    const result = {
-      targetVersion: "0.0.31",
-      method: "respawn" as const,
-    };
-    const disconnect = new RpcClientError.RpcClientError({
-      reason: new Socket.SocketCloseError({ code: 1006 }),
-    });
 
-    return Effect.gen(function* () {
-      const resumed = yield* resolveServerUpdateProgressResult(
-        result.targetVersion,
-        Option.some(result),
-        Exit.fail(disconnect),
-      );
-      expect(resumed).toEqual(result);
-    });
-  });
 
-  it("projects streamed update milestones into the shared operation state", () => {
-    expect(
-      serverUpdateStateForProgressEvent("0.0.30", "0.0.31", {
-        type: "progress",
-        stage: "installing",
-      }),
-    ).toEqual({
-      status: "running",
-      stage: "installing",
-      fromVersion: "0.0.30",
-      targetVersion: "0.0.31",
-    });
-    expect(
-      serverUpdateStateForProgressEvent("0.0.30", "0.0.31", {
-        type: "complete",
-        result: { targetVersion: "0.0.31", method: "respawn" },
-      }),
-    ).toEqual({
-      status: "running",
-      stage: "resuming",
-      fromVersion: "0.0.30",
-      targetVersion: "0.0.31",
-    });
-  });
 
-  it("keeps active update state and hides stale failures after a version change", () => {
-    const running = {
-      status: "running" as const,
-      stage: "resuming" as const,
-      fromVersion: "0.0.30",
-      targetVersion: "0.0.31",
-    };
-    const failed = {
-      status: "failed" as const,
-      stage: "installing" as const,
-      fromVersion: "0.0.30",
-      targetVersion: "0.0.31",
-      message: "Install failed.",
-    };
-
-    expect(serverUpdateStateForServerVersion(running, "0.0.31")).toBe(running);
-    expect(serverUpdateStateForServerVersion(failed, "0.0.30")).toBe(failed);
-    expect(serverUpdateStateForServerVersion(failed, null)).toBe(failed);
-    expect(serverUpdateStateForServerVersion(failed, "0.0.31")).toEqual({ status: "idle" });
-  });
-
-  it.effect("correlates launcher outcomes and fails immediately after rollback", () =>
-    Effect.gen(function* () {
-      const result = {
-        targetVersion: "0.0.31",
-        method: "boot-service" as const,
-        updateId: "update-1",
-      };
-      const ready = (status: "committed" | "rolled-back") =>
-        ({
-          version: 1 as const,
-          sequence: 1,
-          type: "ready" as const,
-          payload: {
-            at: "2026-08-01T00:00:00.000Z",
-            environment: { serverVersion: status === "committed" ? "0.0.31" : "0.0.30" },
-            updateOutcome: {
-              id: "update-1",
-              fromVersion: "0.0.30",
-              targetVersion: "0.0.31",
-              status,
-              ...(status === "rolled-back" ? { reason: "prepared-timeout" } : {}),
-            },
-          },
-        }) as Parameters<typeof matchesServerUpdateReadyEvent>[1];
-
-      expect(matchesServerUpdateReadyEvent(result, ready("committed"))).toBe(true);
-      yield* validateServerUpdateReadyEvent(result, ready("committed"));
-      const rollback = yield* Effect.flip(
-        validateServerUpdateReadyEvent(result, ready("rolled-back")),
-      );
-      expect(rollback.message).toBe("prepared-timeout");
-    }),
-  );
 
   it("applies every config category to the projected snapshot", () => {
     const snapshot = applyServerConfigProjection(Option.none(), {

@@ -1,6 +1,21 @@
 # T3 Code
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+T3 Code is an "agent harness control surface". It lets you drive the coding
+agents installed on your machine from a local web app or an Electron desktop
+app.
+
+> **This is a locked-down fork.** Every outbound network integration has been
+> removed: no telemetry, no analytics, no crash/trace reporting, no update
+> checks, no T3 Connect relay or tunnel, no Tailscale, and no third-party
+> asset fetching. The server binds `127.0.0.1` only and cannot be reached
+> from another machine, so the mobile app and the hosted web app are gone
+> too. Once the providers you use are installed, the app runs with no
+> internet access at all.
+>
+> Git and source-control integrations are the deliberate exception: they run
+> only when you ask for them and talk to the hosts your repositories already
+> live on. So do the provider CLIs (Claude Code, Codex, Cursor, Grok,
+> OpenCode), which reach their own vendors as they always have.
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
 
@@ -68,8 +83,6 @@ Full docs live in [docs/](./docs). There's no docs site yet.
 - [Install and first run](./docs/user/install.md)
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
 - Linux: [run T3 Code as a background service](./docs/user/background-service.md)

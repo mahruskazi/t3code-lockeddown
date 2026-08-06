@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as ServerConfig from "../config.ts";
-import { isRemoteReachableHost, resolveSessionCookieName } from "./utils.ts";
+import { resolveSessionCookieName } from "./utils.ts";
 
 export class EnvironmentAuthPolicy extends Context.Service<
   EnvironmentAuthPolicy,
@@ -15,23 +15,11 @@ export class EnvironmentAuthPolicy extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
-  const isRemoteReachable = isRemoteReachableHost(config.host);
-
-  const policy =
-    config.mode === "desktop"
-      ? isRemoteReachable
-        ? "remote-reachable"
-        : "desktop-managed-local"
-      : isRemoteReachable
-        ? "remote-reachable"
-        : "loopback-browser";
+  // Loopback-only binding means the server is never remote-reachable.
+  const policy = config.mode === "desktop" ? "desktop-managed-local" : "loopback-browser";
 
   const bootstrapMethods: ServerAuthDescriptor["bootstrapMethods"] =
-    policy === "desktop-managed-local"
-      ? ["desktop-bootstrap"]
-      : config.mode === "desktop" && policy === "remote-reachable"
-        ? ["desktop-bootstrap", "one-time-token"]
-        : ["one-time-token"];
+    policy === "desktop-managed-local" ? ["desktop-bootstrap"] : ["one-time-token"];
 
   const descriptor: ServerAuthDescriptor = {
     policy,
@@ -40,7 +28,7 @@ export const make = Effect.gen(function* () {
     sessionCookieName: resolveSessionCookieName({
       mode: config.mode,
       port: config.port,
-      host: config.host,
+      host: ServerConfig.LOOPBACK_HOST,
       instanceKey: config.stateDir,
       development: config.devUrl !== undefined,
     }),

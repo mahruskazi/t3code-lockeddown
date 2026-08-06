@@ -5,7 +5,7 @@ import * as Terminal from "effect/Terminal";
 import { Command, GlobalFlag, Prompt } from "effect/unstable/cli";
 
 import packageJson from "../../package.json" with { type: "json" };
-import * as BootService from "../cloud/bootService.ts";
+import * as BootService from "../service/bootService.ts";
 import type * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
@@ -14,7 +14,6 @@ export const bootServiceLayer = (config: ServerConfig.ServerConfig["Service"]) =
   BootService.layer({
     baseDir: config.baseDir,
     logsDir: config.logsDir,
-    cliVersion: packageJson.version,
   }).pipe(Layer.provide(ProcessRunner.layer));
 
 export type ServiceReconcileResult =
@@ -58,7 +57,7 @@ export function formatServiceStatus(
     `  Status: ${status.current ? `installed · t3@${cliVersion}` : "needs an update or repair"}`,
     `  Unit: ${status.unitPath}`,
     `  Logs: ${status.logPath}`,
-    ...(status.current ? [] : ["  Next: Run `npx t3@latest service update`."]),
+    ...(status.current ? [] : ["  Next: Run `t3 service update`."]),
   ].join("\n");
 }
 
@@ -94,7 +93,7 @@ const serviceInstallCommand = Command.make("install", projectLocationFlags).pipe
 
 const serviceUpdateCommand = Command.make("update", projectLocationFlags).pipe(
   Command.withDescription(
-    "Update or repair the background service using this CLI version. Use `npx t3@latest service update` for the latest release.",
+    "Update or repair the background service using this CLI version.",
   ),
   Command.withHandler((flags) =>
     runServiceCommand(
@@ -156,8 +155,7 @@ export const offerServiceDuringOnboarding = Effect.gen(function* () {
     Prompt.confirm({
       message: installed
         ? "The installed T3 Code service needs an update or repair. Update it now?"
-        : "Run T3 Code in the background whenever this machine boots? " +
-          "It stays reachable through T3 Connect even after you log out.",
+        : "Run T3 Code in the background whenever this machine boots?",
       initial: true,
     }),
   );
@@ -184,8 +182,6 @@ export const recoverServiceOnboardingOffer = <R>(
       BootServiceCommandError: (error) =>
         Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
       BootServiceInstallError: (error) =>
-        Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
-      BootServiceUpdatePendingError: (error) =>
         Console.warn(`Background setup did not finish: ${error.message}`).pipe(Effect.as(false)),
     }),
   );

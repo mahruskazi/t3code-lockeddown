@@ -30,7 +30,6 @@ describe("serverRuntimeState", () => {
       const state: ServerRuntimeState.PersistedServerRuntimeState = {
         version: 1,
         pid: 123,
-        host: "127.0.0.1",
         port: 4_971,
         origin: "http://127.0.0.1:4971",
         devUrl: "http://localhost:5733/",
@@ -47,7 +46,7 @@ describe("serverRuntimeState", () => {
   it.effect("records the dev web URL when the server fronts a dev server", () =>
     Effect.gen(function* () {
       const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
-        config: { host: undefined, devUrl: new URL("http://localhost:5733") },
+        config: { devUrl: new URL("http://localhost:5733") },
         port: 13_773,
       });
 
@@ -55,7 +54,7 @@ describe("serverRuntimeState", () => {
       assert.equal(state.origin, "http://127.0.0.1:13773");
 
       const withoutDev = yield* ServerRuntimeState.makePersistedServerRuntimeState({
-        config: { host: undefined, devUrl: undefined },
+        config: { devUrl: undefined },
         port: 13_773,
       });
       assert.isFalse("devUrl" in withoutDev);

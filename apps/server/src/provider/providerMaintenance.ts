@@ -12,10 +12,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
-const LATEST_VERSION_TIMEOUT_MS = 4_000;
 const PROVIDER_UPDATE_ACTION_TOAST_MESSAGE = "Install the update now or review provider settings.";
 
 const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.ProcessEnv =>
@@ -86,10 +84,6 @@ export const ProviderVersionCache = Context.Reference<Map<string, ProviderVersio
     defaultValue: () => new Map(),
   },
 );
-const NpmLatestVersionResponse = Schema.Struct({
-  version: Schema.optional(Schema.String),
-});
-
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
@@ -420,27 +414,13 @@ export function createProviderVersionAdvisory(input: {
   };
 }
 
-const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
-  const client = yield* HttpClient.HttpClient;
-  const request = HttpClientRequest.get(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
-  ).pipe(HttpClientRequest.setHeader("accept", "application/json"));
-  const response = yield* client.execute(request).pipe(
-    Effect.timeoutOption(LATEST_VERSION_TIMEOUT_MS),
-    Effect.orElseSucceed(() => Option.none()),
-  );
-  if (Option.isNone(response)) {
-    return null;
-  }
-  const httpResponse = response.value;
-  if (httpResponse.status < 200 || httpResponse.status >= 300) {
-    return null;
-  }
-  const payload = yield* httpResponse.json.pipe(
-    Effect.flatMap(Schema.decodeUnknownEffect(NpmLatestVersionResponse)),
-    Effect.orElseSucceed(() => null),
-  );
-  return payload ? nonEmptyString(payload.version) : null;
+/**
+ * The locked-down build never queries a package registry, so there is no
+ * "latest" version to compare against. Provider version advisories fall back
+ * to reporting the installed version and the manual update command.
+ */
+const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (_packageName: string) {
+  return yield* Effect.succeed(null);
 });
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (

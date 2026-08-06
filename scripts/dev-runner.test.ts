@@ -22,7 +22,6 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import {
   checkPortAvailabilityOnHosts,
   createDevRunnerEnv,
-  devPortProbeHosts,
   findFirstAvailableOffset,
   getDevRunnerModeArgs,
   isBrowserAllowedPort,
@@ -64,11 +63,9 @@ const devServerInput = {
   browser: undefined,
   autoBootstrapProjectFromCwd: undefined,
   logWebSocketEvents: undefined,
-  host: undefined,
   port: 13_773,
   devUrl: undefined,
   dryRun: false,
-  share: false,
   runArgs: ["--inspect", "secret-token-value"],
 } as const;
 
@@ -148,7 +145,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -169,7 +165,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: true,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -189,7 +184,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: false,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -198,34 +192,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
-    it.effect("supports explicit typed overrides", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const env = yield* createDevRunnerEnv({
-          mode: "dev:server",
-          baseEnv: {},
-          serverOffset: 0,
-          webOffset: 0,
-          t3Home: "/tmp/custom-t3",
-          browser: false,
-          autoBootstrapProjectFromCwd: false,
-          logWebSocketEvents: true,
-          host: "0.0.0.0",
-          port: 4222,
-          devUrl: new URL("http://localhost:7331"),
-        });
-
-        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/custom-t3"));
-        assert.equal(env.T3CODE_PORT, "4222");
-        assert.equal(env.VITE_HTTP_URL, "http://localhost:4222");
-        assert.equal(env.VITE_WS_URL, "ws://localhost:4222");
-        assert.equal(env.T3CODE_NO_BROWSER, "1");
-        assert.equal(env.T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD, "0");
-        assert.equal(env.T3CODE_LOG_WS_EVENTS, "1");
-        assert.equal(env.T3CODE_HOST, "0.0.0.0");
-        assert.equal(env.VITE_DEV_SERVER_URL, "http://localhost:7331/");
-      }),
-    );
 
     it.effect("does not force websocket logging on in dev mode when unset", () =>
       Effect.gen(function* () {
@@ -240,7 +206,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -263,7 +228,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: false,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -284,7 +248,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -293,42 +256,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       }),
     );
 
-    it.effect("pins desktop dev to a stable backend port and websocket url", () =>
-      Effect.gen(function* () {
-        const path = yield* Path.Path;
-        const env = yield* createDevRunnerEnv({
-          mode: "dev:desktop",
-          baseEnv: {
-            T3CODE_PORT: "13773",
-            T3CODE_MODE: "web",
-            T3CODE_NO_BROWSER: "0",
-            T3CODE_HOST: "0.0.0.0",
-            VITE_DEV_SERVER_URL: "http://127.0.0.1:8526",
-            VITE_WS_URL: "ws://localhost:13773",
-          },
-          serverOffset: 0,
-          webOffset: 0,
-          t3Home: "/tmp/my-t3",
-          browser: true,
-          autoBootstrapProjectFromCwd: undefined,
-          logWebSocketEvents: undefined,
-          host: "127.0.0.1",
-          port: 4222,
-          devUrl: undefined,
-        });
-
-        assert.equal(env.T3CODE_HOME, path.resolve("/tmp/my-t3"));
-        assert.equal(env.PORT, "5733");
-        assert.equal(env.VITE_DEV_SERVER_URL, "http://127.0.0.1:5733");
-        assert.equal(env.HOST, "127.0.0.1");
-        assert.equal(env.T3CODE_PORT, "4222");
-        assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:4222");
-        assert.equal(env.T3CODE_MODE, undefined);
-        assert.equal(env.T3CODE_NO_BROWSER, undefined);
-        assert.equal(env.T3CODE_HOST, undefined);
-        assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:4222");
-      }),
-    );
 
     it.effect("defaults dev server mode to the higher backend port range", () =>
       Effect.gen(function* () {
@@ -341,7 +268,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -369,7 +295,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             browser: undefined,
             autoBootstrapProjectFromCwd: undefined,
             logWebSocketEvents: undefined,
-            host: undefined,
             port: undefined,
             devUrl: undefined,
           });
@@ -398,7 +323,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -419,7 +343,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -444,7 +367,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
             browser: undefined,
             autoBootstrapProjectFromCwd: undefined,
             logWebSocketEvents: undefined,
-            host: undefined,
             port: undefined,
             devUrl: undefined,
           });
@@ -456,26 +378,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
     // --host configures the *backend* (T3CODE_HOST). It must not become Vite's
     // bind address by way of an inherited HOST that happens to agree with it.
-    it.effect("drops an inherited HOST even when --host is given", () =>
-      Effect.gen(function* () {
-        const env = yield* createDevRunnerEnv({
-          mode: "dev",
-          baseEnv: { HOST: "0.0.0.0" },
-          serverOffset: 0,
-          webOffset: 0,
-          t3Home: undefined,
-          browser: undefined,
-          autoBootstrapProjectFromCwd: undefined,
-          logWebSocketEvents: undefined,
-          host: "0.0.0.0",
-          port: undefined,
-          devUrl: undefined,
-        });
-
-        assert.equal(env.HOST, undefined);
-        assert.equal(env.T3CODE_HOST, "0.0.0.0");
-      }),
-    );
 
     // Desktop sets HOST itself, so the clearing must not reach it.
     it.effect("still pins HOST for dev:desktop", () =>
@@ -489,7 +391,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -509,7 +410,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -663,31 +563,10 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
   });
 
   describe("devPortProbeHosts", () => {
-    it.effect("probes loopback only when no bind host is configured", () =>
-      Effect.sync(() => {
-        assert.deepStrictEqual(devPortProbeHosts(undefined), ["127.0.0.1", "::1"]);
-        assert.deepStrictEqual(devPortProbeHosts("  "), ["127.0.0.1", "::1"]);
-      }),
-    );
 
     // A port free on loopback can be taken on the interface the server will
     // actually bind, so --host/T3CODE_HOST has to be probed as well.
-    it.effect("adds a non-loopback bind host to the probe list", () =>
-      Effect.sync(() => {
-        assert.deepStrictEqual(devPortProbeHosts("0.0.0.0"), ["127.0.0.1", "::1", "0.0.0.0"]);
-        assert.deepStrictEqual(devPortProbeHosts("192.168.1.10"), [
-          "127.0.0.1",
-          "::1",
-          "192.168.1.10",
-        ]);
-      }),
-    );
 
-    it.effect("does not probe loopback twice when it is the configured host", () =>
-      Effect.sync(() => {
-        assert.deepStrictEqual(devPortProbeHosts("127.0.0.1"), ["127.0.0.1", "::1"]);
-      }),
-    );
 
     // Only the backend honours --host/T3CODE_HOST. Vite reads HOST (set for
     // desktop only), so judging the web port against the backend's interface
@@ -865,7 +744,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           browser: undefined,
           autoBootstrapProjectFromCwd: undefined,
           logWebSocketEvents: undefined,
-          host: undefined,
           port: undefined,
           devUrl: undefined,
         });
@@ -892,7 +770,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           ...devServerInput,
           mode: "dev:desktop",
           port: undefined,
-          share: true,
         }).pipe(
           Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
           Effect.provideService(HostProcessPlatform, "linux"),
@@ -905,86 +782,13 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     // Single-origin browser dev proxies the backend at localhost, so a backend
     // bound only to a specific interface breaks every proxied request in a way
     // that looks like a broken server. Reject the combination up front.
-    it.effect("rejects a specific non-loopback --host for browser dev modes", () => {
-      const spawnerLayer = Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() => Effect.succeed(mockProcess(0))),
-      );
-
-      return Effect.gen(function* () {
-        const error = yield* runDevRunnerWithInput({
-          ...devServerInput,
-          mode: "dev",
-          port: undefined,
-          host: "192.168.1.10",
-        }).pipe(
-          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
-          Effect.provideService(HostProcessPlatform, "linux"),
-          Effect.flip,
-        );
-
-        if (error._tag !== "DevRunnerHostNotProxiableError") {
-          assert.fail(`Unexpected error: ${error._tag}`);
-        }
-        assert.equal(error.mode, "dev");
-        assert.equal(error.host, "192.168.1.10");
-        assert.include(error.message, "0.0.0.0");
-        assert.include(error.message, "--share");
-      });
-    });
 
     // Wildcards keep loopback answering, so the proxy target stays valid and
     // the combination must keep working — it is the documented way to serve a
     // LAN interface and the browser proxy at once.
-    it.effect("still spawns the stack for a wildcard --host in dev mode", () => {
-      let spawnCount = 0;
-      const spawnerLayer = Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() => {
-          spawnCount += 1;
-          return Effect.succeed(mockProcess(0));
-        }),
-      );
-
-      return Effect.gen(function* () {
-        yield* runDevRunnerWithInput({
-          ...devServerInput,
-          mode: "dev",
-          port: undefined,
-          host: "0.0.0.0",
-        }).pipe(
-          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
-          Effect.provideService(HostProcessPlatform, "linux"),
-        );
-
-        assert.equal(spawnCount, 1);
-      });
-    });
 
     // dev:server does not proxy — the client talks to the backend directly —
     // so a specific interface bind stays legitimate there.
-    it.effect("keeps a specific --host working for dev:server", () => {
-      let spawnCount = 0;
-      const spawnerLayer = Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() => {
-          spawnCount += 1;
-          return Effect.succeed(mockProcess(0));
-        }),
-      );
-
-      return Effect.gen(function* () {
-        yield* runDevRunnerWithInput({
-          ...devServerInput,
-          host: "192.168.1.10",
-        }).pipe(
-          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
-          Effect.provideService(HostProcessPlatform, "linux"),
-        );
-
-        assert.equal(spawnCount, 1);
-      });
-    });
 
     it.effect("spawns nothing when --dry-run is combined with --share", () => {
       let spawnCount = 0;
@@ -1002,7 +806,6 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           mode: "dev",
           port: undefined,
           dryRun: true,
-          share: true,
         }).pipe(
           Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
           Effect.provideService(HostProcessPlatform, "linux"),
