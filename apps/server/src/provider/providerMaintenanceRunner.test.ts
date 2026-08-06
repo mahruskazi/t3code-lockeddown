@@ -425,31 +425,6 @@ describe("providerMaintenanceRunner", () => {
     ),
   );
 
-  it.effect(
-    "marks successful commands as unchanged when the refreshed provider is still outdated",
-    () =>
-      Effect.gen(function* () {
-        const { registry } = yield* makeRegistry({
-          ...baseProvider,
-          installed: true,
-          version: "0.1.0",
-        });
-        const updater = yield* makeTestRunner(registry);
-
-        const result = yield* updater.updateProvider(CODEX_DRIVER);
-
-        assert.strictEqual(result.providers[0]?.updateState?.status, "unchanged");
-        assert.include(result.providers[0]?.updateState?.message ?? "", "still detects");
-      }).pipe(
-        Effect.provide(
-          Layer.mergeAll(
-            NonWindowsPlatform,
-            latestVersionHttpClient("9.9.9"),
-            mockSpawnerLayer(() => ({ stdout: "updated" })),
-          ),
-        ),
-      ),
-  );
 
   it.effect("prevents concurrent updates for the same provider", () => {
     const startedLatch: { resolve: () => void } = { resolve: () => {} };

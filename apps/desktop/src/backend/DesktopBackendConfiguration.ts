@@ -56,11 +56,6 @@ const DESKTOP_BACKEND_ENV_NAMES = [
   "T3CODE_NO_BROWSER",
   "T3CODE_HOST",
   "T3CODE_DESKTOP_WS_URL",
-  "T3CODE_DESKTOP_LAN_ACCESS",
-  "T3CODE_DESKTOP_LAN_HOST",
-  "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
-  "T3CODE_TAILSCALE_SERVE",
-  "T3CODE_TAILSCALE_SERVE_PORT",
 ] as const;
 
 // Sensitive env vars that the WSL backend needs but Windows process.env won't
@@ -375,12 +370,6 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
     // the SQLite file with the primary).
     host: wslBindHost,
     desktopBootstrapToken: input.bootstrapToken,
-    // PortSchema rejects 0, so when tailscale serve is disabled we still
-    // need a valid number in this slot. The backend reads tailscaleServePort
-    // only when tailscaleServeEnabled is true, so the actual value here is
-    // inert.
-    tailscaleServeEnabled: false,
-    tailscaleServePort: 443,
     // The packaged sidecar is a Windows executable and cannot run inside the
     // Linux WSL backend. Keep the field absent instead of passing an unusable
     // `/mnt/.../*.exe` path; WSL resource telemetry is reported unavailable.
