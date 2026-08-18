@@ -52,6 +52,13 @@ export const PROVIDER_OPTIONS: Array<{
     available: true,
     pickerSidebarBadge: "new",
   },
+  // [fork:pi]
+  {
+    value: ProviderDriverKind.make("pi"),
+    label: "Pi",
+    available: true,
+    pickerSidebarBadge: "new",
+  },
 ];
 
 export type WorkLogToolLifecycleStatus =

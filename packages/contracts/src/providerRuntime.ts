@@ -28,6 +28,9 @@ const RuntimeEventRawSource = Schema.Union([
   Schema.Literal("opencode.sdk.event"),
   Schema.Literal("acp.jsonrpc"),
   Schema.TemplateLiteral(["acp.", Schema.String, ".extension"]),
+  // [fork:pi]
+  Schema.Literal("pi.rpc"),
+  Schema.Literal("pi.rpc.extension"),
 ]);
 export type RuntimeEventRawSource = typeof RuntimeEventRawSource.Type;
 
