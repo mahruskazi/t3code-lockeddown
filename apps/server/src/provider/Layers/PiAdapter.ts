@@ -58,8 +58,11 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
+import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
+
 import {
   assistantDeltaFromMessageUpdate,
+  buildPiToolCallData,
   canonicalRequestTypeForPiTool,
   detailForPiToolCall,
   itemTypeForPiTool,
@@ -131,6 +134,8 @@ interface PiSessionContext {
   interruptedTurnIds: Set<TurnId>;
   /** contentIndex → live assistant/reasoning item id for delta streaming. */
   readonly activeContentItems: Map<number, { itemId: string; reasoning: boolean }>;
+  /** toolCallId → args from `tool_execution_start`; update/end events omit them. */
+  readonly toolArgsByCallId: Map<string, Record<string, unknown>>;
   assistantItemSeq: number;
   lastUsage: ThreadTokenUsageSnapshot | undefined;
   currentModelSlug: string | undefined;
@@ -638,7 +643,33 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 ? "failed"
                 : "completed"
               : "inProgress";
-            const detail = detailForPiToolCall(tool.toolName, tool.args);
+            // Args only arrive on tool_execution_start; carry them through the
+            // lifecycle so the completed event (the row clients render) keeps
+            // the command/path context.
+            if (event.type === "tool_execution_start") {
+              ctx.toolArgsByCallId.set(tool.toolCallId, tool.args);
+            }
+            const args =
+              Object.keys(tool.args).length > 0
+                ? tool.args
+                : (ctx.toolArgsByCallId.get(tool.toolCallId) ?? {});
+            if (completed) {
+              ctx.toolArgsByCallId.delete(tool.toolCallId);
+            }
+            const itemType = itemTypeForPiTool(tool.toolName);
+            const data = buildPiToolCallData({
+              toolCallId: tool.toolCallId,
+              toolName: tool.toolName,
+              args,
+              resultText: tool.resultText,
+            });
+            const presentation = deriveToolActivityPresentation({
+              itemType,
+              title: tool.toolName,
+              detail: detailForPiToolCall(tool.toolName, args),
+              data,
+              fallbackSummary: tool.toolName,
+            });
             yield* offerRuntimeEvent({
               type:
                 event.type === "tool_execution_start"
@@ -652,15 +683,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               turnId,
               itemId: RuntimeItemId.make(tool.toolCallId),
               payload: {
-                itemType: itemTypeForPiTool(tool.toolName),
+                itemType,
                 status,
-                title: tool.toolName,
-                ...(detail ? { detail } : {}),
-                ...(event.type === "tool_execution_start"
-                  ? { data: { args: tool.args } }
-                  : completed && tool.resultText !== undefined
-                    ? { data: { output: tool.resultText } }
-                    : {}),
+                title: presentation.summary,
+                ...(presentation.detail ? { detail: presentation.detail } : {}),
+                data,
               },
               raw: {
                 source: "pi.rpc",
@@ -846,6 +873,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             turnDone: new Map(),
             interruptedTurnIds: new Set(),
             activeContentItems: new Map(),
+            toolArgsByCallId: new Map(),
             assistantItemSeq: 0,
             lastUsage: undefined,
             currentModelSlug: boundModelSlug,

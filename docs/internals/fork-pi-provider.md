@@ -91,6 +91,15 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   Full-access threads set `T3_PI_APPROVAL_MODE=off` and skip gating.
   Foreign extension `select`/`confirm` dialogs degrade to T3 user-input
   questions; `input`/`editor` dialogs are auto-cancelled (v1 limitation).
+- **Tool rendering.** Tool lifecycle events (`item.started/updated/completed`)
+  follow the shared client data conventions: `data` carries
+  `toolCallId`/`kind`/`command`/`path` (file changes only)/`rawInput`/
+  `rawOutput.content` (built by `buildPiToolCallData`), and titles/details come
+  from `deriveToolActivityPresentation` (`@t3tools/shared/toolActivity`), e.g.
+  "Ran command" instead of raw `bash`. Pi only sends args on
+  `tool_execution_start`, so the adapter caches them per `toolCallId` and
+  re-emits the full `data` on update/end (clients drop `data` from started
+  events and render from completed ones).
 - **Models.** Pi models are `provider/modelId` slugs. The probe discovers the
   catalog via `get_available_models`; `set_model` switches in-session.
 - **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.

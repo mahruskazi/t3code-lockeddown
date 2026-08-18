@@ -393,15 +393,14 @@ export function itemTypeForPiTool(
   }
 }
 
-/** One-line human detail for a tool call (command or file path). */
-export function detailForPiToolCall(
-  toolName: string,
-  args: Record<string, unknown>,
-): string | undefined {
+/** Shell command from tool args (`bash`). */
+export function commandForPiToolCall(args: Record<string, unknown>): string | undefined {
   const command = typeof args.command === "string" ? args.command.trim() : undefined;
-  if (command) {
-    return command.length > 400 ? `${command.slice(0, 400)}…` : command;
-  }
+  return command !== undefined && command.length > 0 ? command : undefined;
+}
+
+/** Primary file path from tool args (`read`/`write`/`edit`). */
+export function primaryPathForPiToolCall(args: Record<string, unknown>): string | undefined {
   for (const key of ["path", "file_path", "filePath", "file"] as const) {
     const value = args[key];
     if (typeof value === "string" && value.trim()) {
@@ -409,6 +408,71 @@ export function detailForPiToolCall(
     }
   }
   return undefined;
+}
+
+/** One-line human detail for a tool call (command or file path). */
+export function detailForPiToolCall(
+  toolName: string,
+  args: Record<string, unknown>,
+): string | undefined {
+  const command = commandForPiToolCall(args);
+  if (command) {
+    return command.length > 400 ? `${command.slice(0, 400)}…` : command;
+  }
+  return primaryPathForPiToolCall(args);
+}
+
+/**
+ * ACP-style action kind for a Pi tool, carried as `data.kind` so the shared
+ * presentation helpers (`@t3tools/shared/toolActivity`) classify the action
+ * ("Ran command", "Read file", …) without knowing Pi's tool names.
+ */
+export function kindForPiTool(toolName: string): string | undefined {
+  switch (toolName) {
+    case "bash":
+      return "execute";
+    case "read":
+      return "read";
+    case "edit":
+      return "edit";
+    case "write":
+      return "write";
+    case "fetch":
+    case "web_search":
+      return "search";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Client-facing `data` payload for a tool lifecycle item. Clients render
+ * tool rows generically from these keys (web: session-logic.ts extractors;
+ * shared: toolActivity.ts): `toolCallId` pairs a tool's update/complete rows,
+ * `command` drives the command preview, top-level `path` feeds changed-file
+ * chips (file changes only — a `read` path must not render as a change),
+ * `rawInput` carries the full args, `rawOutput.content` the result text.
+ */
+export function buildPiToolCallData(input: {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  readonly args: Record<string, unknown>;
+  readonly resultText?: string | undefined;
+}): Record<string, unknown> {
+  const kind = kindForPiTool(input.toolName);
+  const command = commandForPiToolCall(input.args);
+  const path =
+    itemTypeForPiTool(input.toolName) === "file_change"
+      ? primaryPathForPiToolCall(input.args)
+      : undefined;
+  return {
+    toolCallId: input.toolCallId,
+    ...(kind !== undefined ? { kind } : {}),
+    ...(command !== undefined ? { command } : {}),
+    ...(path !== undefined ? { path } : {}),
+    ...(Object.keys(input.args).length > 0 ? { rawInput: input.args } : {}),
+    ...(input.resultText !== undefined ? { rawOutput: { content: input.resultText } } : {}),
+  };
 }
 
 // ── Agent settlement ──────────────────────────────────────────────────

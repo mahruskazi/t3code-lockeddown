@@ -5,10 +5,12 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   assistantDeltaFromMessageUpdate,
+  buildPiToolCallData,
   canonicalRequestTypeForPiTool,
   classifyPiRpcLine,
   detailForPiToolCall,
   itemTypeForPiTool,
+  kindForPiTool,
   parsePiAgentEnd,
   parsePiAvailableModels,
   parsePiExtensionUiRequest,
@@ -214,6 +216,59 @@ describe("tool executions", () => {
     assert.equal(detailForPiToolCall("bash", { command: "ls -la" }), "ls -la");
     assert.equal(detailForPiToolCall("edit", { path: "/tmp/a.ts" }), "/tmp/a.ts");
     assert.isUndefined(detailForPiToolCall("read", {}));
+  });
+
+  it("maps tool names to action kinds", () => {
+    assert.equal(kindForPiTool("bash"), "execute");
+    assert.equal(kindForPiTool("read"), "read");
+    assert.equal(kindForPiTool("edit"), "edit");
+    assert.equal(kindForPiTool("write"), "write");
+    assert.equal(kindForPiTool("fetch"), "search");
+    assert.equal(kindForPiTool("web_search"), "search");
+    assert.isUndefined(kindForPiTool("custom"));
+  });
+
+  it("builds client-facing tool call data", () => {
+    const bash = buildPiToolCallData({
+      toolCallId: "call-1",
+      toolName: "bash",
+      args: { command: "ls" },
+    });
+    assert.deepEqual(bash, {
+      toolCallId: "call-1",
+      kind: "execute",
+      command: "ls",
+      rawInput: { command: "ls" },
+    });
+
+    const edit = buildPiToolCallData({
+      toolCallId: "call-2",
+      toolName: "edit",
+      args: { path: "/tmp/a.ts" },
+    });
+    assert.equal(edit.kind, "edit");
+    assert.equal(edit.path, "/tmp/a.ts");
+
+    // A read path must not surface as a top-level `path` (changed-file chip).
+    const read = buildPiToolCallData({
+      toolCallId: "call-3",
+      toolName: "read",
+      args: { path: "/tmp/a.ts" },
+    });
+    assert.equal(read.kind, "read");
+    assert.isUndefined(read.path);
+    assert.deepEqual(read.rawInput, { path: "/tmp/a.ts" });
+
+    const withResult = buildPiToolCallData({
+      toolCallId: "call-4",
+      toolName: "bash",
+      args: { command: "ls" },
+      resultText: "file.txt",
+    });
+    assert.deepEqual(withResult.rawOutput, { content: "file.txt" });
+
+    const empty = buildPiToolCallData({ toolCallId: "call-5", toolName: "custom", args: {} });
+    assert.deepEqual(empty, { toolCallId: "call-5" });
   });
 });
 

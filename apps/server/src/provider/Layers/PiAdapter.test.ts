@@ -208,6 +208,21 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
       );
       assert.isDefined(toolStart);
 
+      // The completed event carries the client render data; the end event from
+      // Pi has no args, so `command` proves the start-event args cache worked.
+      const toolCompleted = runtimeEvents.find(
+        (e) => e.type === "item.completed" && e.payload.itemType === "command_execution",
+      );
+      assert.isDefined(toolCompleted);
+      if (toolCompleted?.type === "item.completed") {
+        assert.equal(toolCompleted.payload.title, "Ran command");
+        const data = toolCompleted.payload.data as Record<string, unknown> | undefined;
+        assert.isDefined(data);
+        assert.equal(data?.toolCallId, "call-1");
+        assert.equal(data?.command, "rm -rf /tmp/x");
+        assert.deepEqual(data?.rawOutput, { content: "done" });
+      }
+
       // Pi received the mapped answer over extension_ui_response.
       const uiLog = yield* waitForFileContent(uiLogPath);
       assert.include(uiLog, '"value":"Allow"');
