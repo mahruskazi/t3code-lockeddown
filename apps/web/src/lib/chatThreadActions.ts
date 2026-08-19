@@ -5,6 +5,9 @@ import type { DraftThreadEnvMode } from "../composerDraftStore";
 interface ThreadContextLike {
   environmentId: EnvironmentId;
   projectId: ProjectId;
+  branch?: string | null;
+  worktreePath?: string | null;
+  envMode?: DraftThreadEnvMode;
 }
 
 interface NewThreadHandler {
@@ -15,6 +18,7 @@ interface NewThreadHandler {
       worktreePath?: string | null;
       envMode?: DraftThreadEnvMode;
       startFromOrigin?: boolean;
+      inheritThreadSettings?: boolean;
     },
     // The opened draft's identity, which most callers have no use for.
   ): Promise<unknown>;
@@ -49,20 +53,48 @@ export function resolveThreadActionProjectRef(
   return context.defaultProjectRef;
 }
 
-// New threads inherit only the *project* from the current context. Branch,
-// worktree, and env mode always come from the user's configured defaults —
-// carrying them over from the viewed thread meant "new thread" silently
-// reused checkouts and branches. Explicit affordances (branch toolbar's
-// "new thread in this worktree") pass those options to handleNewThread
-// directly instead.
+export function resolveThreadActionWorkspace(
+  context: Pick<ChatThreadActionContext, "activeDraftThread" | "activeThread">,
+): {
+  branch: string | null;
+  worktreePath: string | null;
+  envMode: DraftThreadEnvMode;
+  startFromOrigin: false;
+} | null {
+  const source = context.activeThread ?? context.activeDraftThread;
+  if (!source) return null;
+
+  const worktreePath = source.worktreePath ?? null;
+  return {
+    branch: source.branch ?? null,
+    worktreePath,
+    envMode: source.envMode ?? (worktreePath ? "worktree" : "local"),
+    // This is an existing checkout. Origin is only meaningful while creating
+    // a brand-new worktree from the configured defaults.
+    startFromOrigin: false,
+  };
+}
+
+// Contextual new-thread entry points always preserve the project. The
+// duplicate-context shortcut can additionally opt into the viewed thread's
+// settings and checkout; ordinary creation uses configured/sticky defaults.
 export async function startNewThreadFromContext(
   context: ChatThreadActionContext,
+  options: { inheritThreadSettings?: boolean } = {},
 ): Promise<boolean> {
   const projectRef = resolveThreadActionProjectRef(context);
   if (!projectRef) {
     return false;
   }
 
-  await context.handleNewThread(projectRef);
+  await context.handleNewThread(
+    projectRef,
+    options.inheritThreadSettings
+      ? {
+          ...resolveThreadActionWorkspace(context),
+          inheritThreadSettings: true,
+        }
+      : undefined,
+  );
   return true;
 }
