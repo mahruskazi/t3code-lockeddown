@@ -1,4 +1,4 @@
-import { Path, Svg } from "react-native-svg";
+import { Path, Rect, Svg } from "react-native-svg";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 
 type ProviderIconProps = {
@@ -62,20 +62,14 @@ export function ProviderIcon(props: ProviderIconProps) {
   // [fork:pi]
   if (props.provider === "pi") {
     return (
-      <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <Svg width={size} height={size} viewBox="0 0 800 800">
+        <Rect width={800} height={800} rx={120} fill="#09090b" />
         <Path
-          d="M3.5 7.6C4.6 5.9 6.2 5.6 8 5.6h12.5"
-          stroke={mono}
-          strokeWidth={2.4}
-          strokeLinecap="round"
+          fill="#fff"
+          fillRule="evenodd"
+          d="M165.29 165.29h352.07V400H400v117.36H282.65v117.36H165.29V165.29Zm117.36 117.36V400H400V282.65H282.65Z"
         />
-        <Path d="M9.2 5.9V18.4" stroke={mono} strokeWidth={2.4} strokeLinecap="round" />
-        <Path
-          d="M16 5.9v9.7c0 1.7 1 2.8 2.4 2.8.8 0 1.5-.3 2.1-.9"
-          stroke={mono}
-          strokeWidth={2.4}
-          strokeLinecap="round"
-        />
+        <Path fill="#fff" d="M517.36 400h117.36v234.72H517.36V400Z" />
       </Svg>
     );
   }
