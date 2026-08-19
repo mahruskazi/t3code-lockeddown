@@ -83,6 +83,15 @@ The most common defect in this repo is a change that works on the path you teste
 - The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to. If the token got consumed, mint a fresh one with `node apps/server/src/bin.ts pair` — note it carries standard scopes, while the startup URL carries admin scopes (needed for Settings → Connections management).
 - Stop what you started, by the PID you tracked. See rule 1.
 
+## Remote environments (Coder / SSH)
+
+This fork is deployed to remote SSH hosts (e.g. Coder workspaces) from the local checkout, never from the published npm package. Upstream's SSH launcher falls back to `npx t3@<version>` when no `t3` is on the remote PATH; this fork removes that fallback entirely (`REMOTE_RUNNER_SCRIPT` in `packages/ssh/src/tunnel.ts`) and fails with instructions instead. Provisioning works like this:
+
+- `scripts/setup-remote-t3.sh <ssh-host> [remote-dir]` rsyncs this checkout to the remote, builds `apps/server/dist/bin.mjs` there (mise-pinned node 24 + repo pnpm, `--frozen-lockfile`), and installs a `~/.local/bin/t3` shim pointing at that build. The launcher finds the shim via its `command -v t3` branch.
+- The script is idempotent: re-run it after changing the fork, then disconnect and reconnect the environment in the desktop app so the launcher restarts the server from the new build.
+- Do not reintroduce the npm install fallback — it would silently swap this fork's server for the upstream published one on any unprovisioned host.
+- The remote host needs mise (`curl -fsSL https://mise.run | sh`) and a C toolchain for node-pty; everything else the script handles.
+
 ## Test data
 
 An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:
