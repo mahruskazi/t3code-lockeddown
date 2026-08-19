@@ -231,6 +231,75 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
     }),
   );
 
+  it.effect("surfaces structured Pi questions and returns the complete answer map", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-user-input-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-adapter-user-input-log-")),
+      );
+      const uiLogPath = NodePath.join(tempDir, "ui.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_USER_INPUT: "1", PI_MOCK_UI_LOG_PATH: uiLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (event.type === "user-input.requested" && event.requestId !== undefined) {
+            yield* adapter
+              .respondToUserInput(threadId, ApprovalRequestId.make(event.requestId), {
+                platform: "Desktop",
+                features: ["Speed", "Remote"],
+              })
+              .pipe(Effect.orDie);
+          }
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "ask me", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      const requested = runtimeEvents.find((event) => event.type === "user-input.requested");
+      assert.isDefined(requested);
+      if (requested?.type === "user-input.requested") {
+        assert.lengthOf(requested.payload.questions, 2);
+        assert.equal(requested.payload.questions[0]?.header, "Platform");
+        assert.equal(requested.payload.questions[0]?.options[0]?.description, "The desktop app");
+        assert.isTrue(requested.payload.questions[1]?.multiSelect);
+      }
+      const resolved = runtimeEvents.find((event) => event.type === "user-input.resolved");
+      assert.isDefined(resolved);
+      if (resolved?.type === "user-input.resolved") {
+        assert.deepEqual(resolved.payload.answers, {
+          platform: "Desktop",
+          features: ["Speed", "Remote"],
+        });
+      }
+
+      const uiLog = yield* waitForFileContent(uiLogPath);
+      const response = JSON.parse(uiLog.trim()) as Record<string, unknown>;
+      assert.equal(
+        response.value,
+        't3-user-input-response:v1:{"platform":"Desktop","features":["Speed","Remote"]}',
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("interruptTurn settles a streaming turn as cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("pi-interrupt-thread");

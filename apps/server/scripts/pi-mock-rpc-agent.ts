@@ -8,6 +8,7 @@
  * Behavior knobs (env):
  *   PI_MOCK_APPROVAL=1            emit a T3-marker extension_ui_request
  *                                 before streaming, and gate on the answer
+ *   PI_MOCK_USER_INPUT=1          emit a structured user-input UI request
  *   PI_MOCK_HANG_PROMPT=1         start streaming but never settle the turn
  *   PI_MOCK_FAIL_PROMPT=1         answer the prompt ack with success:false
  *   PI_MOCK_UI_LOG_PATH=<file>    append extension_ui_response bodies
@@ -22,6 +23,7 @@ const uiLogPath = process.env.PI_MOCK_UI_LOG_PATH;
 const exitLogPath = process.env.PI_MOCK_EXIT_LOG_PATH;
 const argsLogPath = process.env.PI_MOCK_ARGS_LOG_PATH;
 const emitApproval = process.env.PI_MOCK_APPROVAL === "1";
+const emitUserInput = process.env.PI_MOCK_USER_INPUT === "1";
 const hangPrompt = process.env.PI_MOCK_HANG_PROMPT === "1";
 const failPrompt = process.env.PI_MOCK_FAIL_PROMPT === "1";
 
@@ -122,6 +124,47 @@ async function runTurn() {
     }
   }
 
+  if (emitUserInput) {
+    const payload = {
+      questions: [
+        {
+          id: "platform",
+          header: "Platform",
+          question: "Which Discord platform do you use most?",
+          options: [
+            { label: "Desktop", description: "The desktop app" },
+            { label: "Mobile", description: "The mobile app" },
+          ],
+          multiSelect: false,
+        },
+        {
+          id: "features",
+          header: "Features",
+          question: "Which features matter?",
+          options: [
+            { label: "Speed", description: "Fast interactions" },
+            { label: "Remote", description: "Remote access" },
+          ],
+          multiSelect: true,
+        },
+      ],
+    };
+    const answer = await new Promise<Record<string, unknown>>((resolve) => {
+      pendingUiResolve = resolve;
+      writeLine({
+        type: "extension_ui_request",
+        id: "ui-2",
+        method: "select",
+        title: `t3-user-input:v1:${JSON.stringify(payload)}`,
+        options: ["Answer in T3 Code"],
+      });
+    });
+    pendingUiResolve = undefined;
+    if (uiLogPath) {
+      NodeFS.appendFileSync(uiLogPath, `${JSON.stringify(answer)}\n`);
+    }
+  }
+
   await sleep(5);
   writeLine({
     type: "message_update",
@@ -217,7 +260,7 @@ function handleCommand(command: Record<string, unknown>) {
       return;
     }
     case "extension_ui_response": {
-      if (pendingUiResolve && command.id === "ui-1") {
+      if (pendingUiResolve && (command.id === "ui-1" || command.id === "ui-2")) {
         pendingUiResolve(command);
       }
       return;

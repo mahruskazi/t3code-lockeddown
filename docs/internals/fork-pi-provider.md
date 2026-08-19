@@ -91,6 +91,11 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   Full-access threads set `T3_PI_APPROVAL_MODE=off` and skip gating.
   Foreign extension `select`/`confirm` dialogs degrade to T3 user-input
   questions; `input`/`editor` dialogs are auto-cancelled (v1 limitation).
+- **Structured questions.** Pi's RPC mode cannot render `ctx.ui.custom()`.
+  Question extensions can instead emit a `select` dialog whose title starts
+  with `t3-user-input:v1:` followed by the JSON-encoded normalized questions.
+  The adapter renders one first-class T3 question card and returns the answer
+  map as the selected value prefixed with `t3-user-input-response:v1:`.
 - **Tool rendering.** Tool lifecycle events (`item.started/updated/completed`)
   follow the shared client data conventions: `data` carries
   `toolCallId`/`kind`/`command`/`path` (file changes only)/`rawInput`/
