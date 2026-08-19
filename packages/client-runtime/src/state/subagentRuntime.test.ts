@@ -856,6 +856,48 @@ describe("task type classification is a denylist", () => {
     ]);
     expect(agents.map((agent) => agent.id).toSorted()).toEqual(["a1", "a2"]);
   });
+
+  it("renders Pi and Codex harness roles without provider-specific assumptions", () => {
+    const agents = fold([
+      activity("task.started", {
+        taskId: "pi:run-1:sa-1",
+        taskType: "local_agent",
+        title: "Pi researcher",
+        role: "pi",
+        model: "openai/gpt-5",
+        effort: "high",
+      }),
+      activity("task.progress", {
+        taskId: "pi:run-1:sa-1",
+        taskType: "local_agent",
+        role: "pi",
+        model: "openai/gpt-5",
+        effort: "high",
+        status: "waiting",
+      }),
+      activity("task.started", {
+        taskId: "pi:run-1:sa-2",
+        taskType: "local_agent",
+        title: "Codex verifier",
+        role: "codex",
+        model: "gpt-5-codex",
+      }),
+    ]);
+    expect(agents).toHaveLength(2);
+    expect(agents[0]).toMatchObject({
+      title: "Pi researcher",
+      role: "pi",
+      model: "openai/gpt-5",
+      effort: "high",
+      status: "waiting",
+    });
+    expect(agents[1]).toMatchObject({
+      title: "Codex verifier",
+      role: "codex",
+      model: "gpt-5-codex",
+      status: "running",
+    });
+  });
 });
 
 describe("nested agents vs subagent shells", () => {

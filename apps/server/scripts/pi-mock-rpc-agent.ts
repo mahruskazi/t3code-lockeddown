@@ -14,6 +14,8 @@
  *   PI_MOCK_UI_LOG_PATH=<file>    append extension_ui_response bodies
  *   PI_MOCK_EXIT_LOG_PATH=<file>  write "exited" on shutdown
  *   PI_MOCK_ARGS_LOG_PATH=<file>  write process argv on startup
+ *   PI_MOCK_SUBAGENTS=1           emit T3 Pi-subagent lifecycle markers
+ *   PI_MOCK_SUBAGENT_HANG=1       leave the emitted child running
  *
  * [fork:pi] Test-only. See docs/internals/fork-pi-provider.md.
  */
@@ -26,6 +28,9 @@ const emitApproval = process.env.PI_MOCK_APPROVAL === "1";
 const emitUserInput = process.env.PI_MOCK_USER_INPUT === "1";
 const hangPrompt = process.env.PI_MOCK_HANG_PROMPT === "1";
 const failPrompt = process.env.PI_MOCK_FAIL_PROMPT === "1";
+const emitSubagents =
+  process.env.PI_MOCK_SUBAGENTS === "1" && process.env.T3_PI_SUBAGENT_BRIDGE === "v1";
+const hangSubagent = process.env.PI_MOCK_SUBAGENT_HANG === "1";
 
 if (argsLogPath) {
   NodeFS.writeFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)));
@@ -47,6 +52,17 @@ const state = {
 function writeLine(value: unknown) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
+
+const bridgeRunId = `mock-${process.pid}`;
+let notificationId = 0;
+const subagentMarker = (payload: Record<string, unknown>) =>
+  writeLine({
+    type: "extension_ui_request",
+    id: `notify-${++notificationId}`,
+    method: "notify",
+    message: `t3-subagent:v1:${JSON.stringify(payload)}`,
+    notifyType: "info",
+  });
 
 function respond(id: string | undefined, command: string, body: Record<string, unknown> = {}) {
   writeLine({
@@ -85,6 +101,23 @@ async function runTurn() {
   aborted = false;
   state.isStreaming = true;
   writeLine({ type: "agent_start" });
+
+  if (emitSubagents) {
+    const started = {
+      kind: "started",
+      bridgeRunId,
+      childId: "sa-1",
+      title: "Mock child",
+      harness: "pi",
+      cwd: process.cwd(),
+      model: "openai/gpt-5",
+      effort: "high",
+      toolUseId: "subagent-tool-1",
+      transcriptPath: "/tmp/mock-child/session.jsonl",
+    };
+    subagentMarker(started);
+    subagentMarker(started);
+  }
 
   if (emitApproval) {
     const payload = {
@@ -195,6 +228,28 @@ async function runTurn() {
     messages: [{ role: "assistant", stopReason: "stop" }],
     willRetry: false,
   });
+  if (emitSubagents && !hangSubagent) {
+    subagentMarker({
+      kind: "progress",
+      bridgeRunId,
+      childId: "sa-1",
+      status: "running",
+      lastToolName: "read",
+      summary: "Finishing the mock child",
+      usedTokens: 120,
+      contextWindow: 1_000,
+    });
+    const completed = {
+      kind: "completed",
+      bridgeRunId,
+      childId: "sa-1",
+      status: "completed",
+      summary: "Mock child complete",
+      usedTokens: 180,
+    };
+    subagentMarker(completed);
+    subagentMarker(completed);
+  }
 }
 
 function handleCommand(command: Record<string, unknown>) {
