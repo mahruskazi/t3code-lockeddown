@@ -9,6 +9,7 @@ import {
   canonicalRequestTypeForPiTool,
   classifyPiRpcLine,
   detailForPiToolCall,
+  encodeT3PiUserInputResponse,
   itemTypeForPiTool,
   kindForPiTool,
   parsePiAgentEnd,
@@ -20,11 +21,14 @@ import {
   parsePiToolExecution,
   parseT3PiApprovalTitle,
   parseT3PiSubagentEvent,
+  parseT3PiUserInputTitle,
   piModelSlugFromRecord,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
   T3_PI_APPROVAL_TITLE_PREFIX,
   T3_PI_SUBAGENT_EVENT_PREFIX,
+  T3_PI_USER_INPUT_RESPONSE_PREFIX,
+  T3_PI_USER_INPUT_TITLE_PREFIX,
   usageSnapshotFromPiUsage,
 } from "./PiRpcModel.ts";
 import { T3_PI_EXTENSION_SOURCE } from "./PiExtensionSource.ts";
@@ -465,6 +469,48 @@ describe("extension UI protocol", () => {
           })}`,
           "setStatus",
         ),
+      ),
+    );
+  });
+
+  it("round-trips structured T3 user-input markers", () => {
+    const payload = {
+      questions: [
+        {
+          id: "platform",
+          header: "Platform",
+          question: "Which platform?",
+          options: [{ label: "Desktop", description: "Desktop app" }, { label: "Mobile" }],
+          multiSelect: false,
+        },
+      ],
+    };
+    const parsed = parseT3PiUserInputTitle(
+      `${T3_PI_USER_INPUT_TITLE_PREFIX}${JSON.stringify(payload)}`,
+    );
+    assert.deepStrictEqual(parsed, {
+      questions: [
+        {
+          id: "platform",
+          header: "Platform",
+          question: "Which platform?",
+          options: [
+            { label: "Desktop", description: "Desktop app" },
+            { label: "Mobile", description: "Mobile" },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+    assert.equal(
+      encodeT3PiUserInputResponse({ platform: "Desktop" }),
+      `${T3_PI_USER_INPUT_RESPONSE_PREFIX}{"platform":"Desktop"}`,
+    );
+    assert.isUndefined(parseT3PiUserInputTitle("plain title"));
+    assert.isUndefined(parseT3PiUserInputTitle(`${T3_PI_USER_INPUT_TITLE_PREFIX}not json`));
+    assert.isUndefined(
+      parseT3PiUserInputTitle(
+        `${T3_PI_USER_INPUT_TITLE_PREFIX}${JSON.stringify({ questions: [] })}`,
       ),
     );
   });

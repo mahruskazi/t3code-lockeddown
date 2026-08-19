@@ -13,7 +13,11 @@
  *
  * @module provider/piRpc/PiRpcModel
  */
-import type { ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import type {
+  ProviderUserInputAnswers,
+  ThreadTokenUsageSnapshot,
+  UserInputQuestion,
+} from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -697,6 +701,83 @@ export function parseT3PiApprovalTitle(title: string | undefined): T3PiApprovalR
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Structured question dialogs use the same title-marker transport as approvals.
+ * Pi's RPC protocol cannot carry custom TUI components, so an extension emits a
+ * regular `select` whose title contains the questions for T3 to render.
+ */
+export const T3_PI_USER_INPUT_TITLE_PREFIX = "t3-user-input:v1:";
+export const T3_PI_USER_INPUT_RESPONSE_PREFIX = "t3-user-input-response:v1:";
+
+export interface T3PiUserInputRequest {
+  readonly questions: ReadonlyArray<UserInputQuestion>;
+}
+
+function parseT3PiUserInputQuestion(value: unknown): UserInputQuestion | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const id = stringField(value, "id")?.trim();
+  const header = stringField(value, "header")?.trim();
+  const question = stringField(value, "question")?.trim();
+  if (!id || !header || !question || !Array.isArray(value.options)) {
+    return undefined;
+  }
+  const options = value.options.flatMap((option) => {
+    if (!isRecord(option)) {
+      return [];
+    }
+    const label = stringField(option, "label")?.trim();
+    if (!label) {
+      return [];
+    }
+    const description = stringField(option, "description")?.trim() || label;
+    return [{ label, description }];
+  });
+  if (options.length === 0 || options.length !== value.options.length) {
+    return undefined;
+  }
+  return {
+    id,
+    header,
+    question,
+    options,
+    multiSelect: value.multiSelect === true,
+  };
+}
+
+export function parseT3PiUserInputTitle(
+  title: string | undefined,
+): T3PiUserInputRequest | undefined {
+  if (!title || !title.startsWith(T3_PI_USER_INPUT_TITLE_PREFIX)) {
+    return undefined;
+  }
+  try {
+    const payload: unknown = JSON.parse(title.slice(T3_PI_USER_INPUT_TITLE_PREFIX.length));
+    if (!isRecord(payload) || !Array.isArray(payload.questions)) {
+      return undefined;
+    }
+    const questions = payload.questions.flatMap((value) => {
+      const parsed = parseT3PiUserInputQuestion(value);
+      return parsed ? [parsed] : [];
+    });
+    if (
+      questions.length === 0 ||
+      questions.length !== payload.questions.length ||
+      new Set(questions.map((entry) => entry.id)).size !== questions.length
+    ) {
+      return undefined;
+    }
+    return { questions };
+  } catch {
+    return undefined;
+  }
+}
+
+export function encodeT3PiUserInputResponse(answers: ProviderUserInputAnswers): string {
+  return `${T3_PI_USER_INPUT_RESPONSE_PREFIX}${JSON.stringify(answers)}`;
 }
 
 export function canonicalRequestTypeForPiTool(
