@@ -35,8 +35,11 @@ interface RecordedBatchBody {
   }>;
 }
 
+// Locked-down fork tripwire: telemetry must never be sent, even when the
+// environment explicitly enables it. If an upstream merge restores the live
+// PostHog layer, this test fails.
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
-  it.effect("flush drains all buffered events across multiple batches", () =>
+  it.effect("never sends telemetry even when the environment enables it", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
       const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
@@ -91,32 +94,8 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
           Array.isArray(request.body?.batch),
       );
-      assert.equal(batchRequests.length, 3);
-      assert.equal(
-        batchRequests.every(
-          (request) => request.path.endsWith("/batch/") || request.path.endsWith("/batch"),
-        ),
-        true,
-      );
-      const deliveredIndexes = batchRequests.flatMap((request) =>
-        request.body.batch
-          .filter((event) => event.event === "test.flush.drain")
-          .map((event) => event.properties?.index)
-          .filter((index): index is number => typeof index === "number"),
-      );
-
-      const sorted = deliveredIndexes.toSorted((a, b) => a - b);
-      assert.equal(sorted.length, 45);
-      assert.deepEqual(
-        sorted,
-        Array.from({ length: 45 }, (_, index) => index),
-      );
-      assert.equal(
-        batchRequests.every((request) =>
-          request.body.batch.every((event) => event.properties?.clientType === "cli-web-client"),
-        ),
-        true,
-      );
+      assert.equal(batchRequests.length, 0);
+      assert.equal(capturedRequests.length, 0);
     }),
   );
 });

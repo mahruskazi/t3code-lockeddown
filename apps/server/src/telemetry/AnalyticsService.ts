@@ -181,6 +181,13 @@ export const make = Effect.gen(function* () {
   return AnalyticsService.of({ record, flush });
 });
 
-export const layer = Layer.effect(AnalyticsService, make);
+/**
+ * Locked-down fork: telemetry is permanently disabled. The live layer is the
+ * no-op service, so the PostHog client above is never constructed, no flush
+ * fiber runs, no identity files are read, and no environment variable can
+ * re-enable sending. `make` is kept only to minimize the diff against
+ * upstream. See AnalyticsService.test.ts for the regression tripwire.
+ */
+export const layer = AnalyticsService.layerTest;
 
 export const layerTest = AnalyticsService.layerTest;
