@@ -19,10 +19,12 @@ import {
   parsePiRpcLineText,
   parsePiToolExecution,
   parseT3PiApprovalTitle,
+  parseT3PiSubagentEvent,
   piModelSlugFromRecord,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
   T3_PI_APPROVAL_TITLE_PREFIX,
+  T3_PI_SUBAGENT_EVENT_PREFIX,
   usageSnapshotFromPiUsage,
 } from "./PiRpcModel.ts";
 import { T3_PI_EXTENSION_SOURCE } from "./PiExtensionSource.ts";
@@ -333,6 +335,138 @@ describe("extension UI protocol", () => {
     assert.isUndefined(parseT3PiApprovalTitle(`${T3_PI_APPROVAL_TITLE_PREFIX}not json`));
     assert.isUndefined(parseT3PiApprovalTitle(`${T3_PI_APPROVAL_TITLE_PREFIX}{"detail":"x"}`));
     assert.isUndefined(parseT3PiApprovalTitle(undefined));
+  });
+
+  it("parses versioned T3 subagent lifecycle notifications", () => {
+    const marker = (payload: unknown) => ({
+      type: "extension_ui_request",
+      id: "ui-subagent",
+      method: "notify",
+      message: `${T3_PI_SUBAGENT_EVENT_PREFIX}${JSON.stringify(payload)}`,
+    });
+    assert.deepStrictEqual(
+      parseT3PiSubagentEvent(
+        marker({
+          kind: "started",
+          bridgeRunId: "run-1",
+          childId: "sa-1",
+          title: "Research",
+          harness: "pi",
+          cwd: "/tmp/project",
+          model: "openai/gpt-5",
+          effort: "high",
+          toolUseId: "tool-1",
+          transcriptPath: "/tmp/child.jsonl",
+        }),
+      ),
+      {
+        kind: "started",
+        bridgeRunId: "run-1",
+        childId: "sa-1",
+        title: "Research",
+        harness: "pi",
+        cwd: "/tmp/project",
+        model: "openai/gpt-5",
+        effort: "high",
+        toolUseId: "tool-1",
+        transcriptPath: "/tmp/child.jsonl",
+      },
+    );
+    assert.deepStrictEqual(
+      parseT3PiSubagentEvent(
+        marker({
+          kind: "progress",
+          bridgeRunId: "run-1",
+          childId: "sa-1",
+          status: "waiting",
+          lastToolName: "read",
+          summary: "Inspecting files",
+          usedTokens: 120,
+          contextWindow: 1_000,
+        }),
+      ),
+      {
+        kind: "progress",
+        bridgeRunId: "run-1",
+        childId: "sa-1",
+        status: "waiting",
+        lastToolName: "read",
+        summary: "Inspecting files",
+        usedTokens: 120,
+        contextWindow: 1_000,
+      },
+    );
+    assert.deepStrictEqual(
+      parseT3PiSubagentEvent(
+        marker({
+          kind: "completed",
+          bridgeRunId: "run-1",
+          childId: "sa-1",
+          status: "completed",
+          summary: "Done",
+          usedTokens: 180,
+        }),
+      ),
+      {
+        kind: "completed",
+        bridgeRunId: "run-1",
+        childId: "sa-1",
+        status: "completed",
+        summary: "Done",
+        usedTokens: 180,
+      },
+    );
+  });
+
+  it("rejects malformed, unknown-version, missing-identity, and oversized markers", () => {
+    const event = (message: string, method = "notify") => ({
+      type: "extension_ui_request",
+      id: "ui-subagent",
+      method,
+      message,
+    });
+    const validIdentity = { bridgeRunId: "run-1", childId: "sa-1" };
+    assert.isUndefined(parseT3PiSubagentEvent(event(`${T3_PI_SUBAGENT_EVENT_PREFIX}{broken`)));
+    assert.isUndefined(
+      parseT3PiSubagentEvent(
+        event(`t3-subagent:v2:${JSON.stringify({ kind: "completed", ...validIdentity })}`),
+      ),
+    );
+    assert.isUndefined(
+      parseT3PiSubagentEvent(
+        event(
+          `${T3_PI_SUBAGENT_EVENT_PREFIX}${JSON.stringify({
+            kind: "completed",
+            childId: "sa-1",
+            status: "completed",
+          })}`,
+        ),
+      ),
+    );
+    assert.isUndefined(
+      parseT3PiSubagentEvent(
+        event(
+          `${T3_PI_SUBAGENT_EVENT_PREFIX}${JSON.stringify({
+            kind: "progress",
+            ...validIdentity,
+            status: "running",
+            summary: "x".repeat(513),
+          })}`,
+        ),
+      ),
+    );
+    assert.isUndefined(
+      parseT3PiSubagentEvent(
+        event(
+          `${T3_PI_SUBAGENT_EVENT_PREFIX}${JSON.stringify({
+            kind: "completed",
+            ...validIdentity,
+            status: "completed",
+          })}`,
+          "setStatus",
+        ),
+      ),
+    );
   });
 
   it("stays in sync with the embedded extension source", () => {

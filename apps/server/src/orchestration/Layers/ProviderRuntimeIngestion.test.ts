@@ -196,7 +196,10 @@ async function waitForThread(
 
 describe("ProviderRuntimeIngestion", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderRuntimeIngestionService
+    | ProjectionSnapshotQuery
+    | ThreadBackgroundLiveness.ThreadBackgroundLivenessService,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -258,6 +261,9 @@ describe("ProviderRuntimeIngestion", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    const backgroundLiveness = await runtime.runPromise(
+      Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
+    );
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(ingestion.drain);
@@ -323,6 +329,8 @@ describe("ProviderRuntimeIngestion", () => {
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
+      getBackgroundLiveness: (threadId = "thread-1") =>
+        backgroundLiveness.getThreadBackgroundLiveness(threadId),
     };
   }
 
@@ -3301,6 +3309,72 @@ describe("ProviderRuntimeIngestion", () => {
         (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-task-1",
       )?.planMarkdown,
     ).toBe("# Plan title");
+  });
+
+  it("persists Pi child linkage and keeps background liveness until completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const common = {
+      taskId: "pi:run-1:sa-1",
+      taskType: "local_agent",
+      title: "Pi researcher",
+      role: "pi",
+      model: "openai/gpt-5",
+      effort: "high",
+      toolUseId: "subagent-tool-1",
+      runHandles: { runId: "run-1:sa-1", transcriptDir: "/tmp/pi-child" },
+      timelineBypass: true,
+    } as const;
+
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("evt-pi-task-started"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-parent"),
+      payload: { ...common, description: "Pi researcher" },
+    });
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-pi-parent-completed"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-parent"),
+      payload: { state: "completed", stopReason: null },
+    });
+    await harness.drain();
+    expect(harness.getBackgroundLiveness()).toBe("working");
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("evt-pi-task-completed"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-pi-parent"),
+      payload: {
+        ...common,
+        status: "completed",
+        summary: "Research complete",
+        typedUsage: { totalTokens: 180 },
+      },
+    });
+    await harness.drain();
+    expect(harness.getBackgroundLiveness()).toBeNull();
+
+    const thread = await harness.readModel();
+    const activity = thread.threads
+      .find((entry) => entry.id === "thread-1")
+      ?.activities.find((entry) => entry.id === "evt-pi-task-completed");
+    expect(activity?.payload).toMatchObject({
+      ...common,
+      agentKind: "agent",
+      status: "completed",
+      summary: "Research complete",
+      typedUsage: { totalTokens: 180 },
+    });
   });
 
   it("titles task activities with the task description, including on completion", async () => {

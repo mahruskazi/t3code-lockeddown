@@ -280,6 +280,136 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
     }),
   );
 
+  it.effect(
+    "maps Pi extension children after the parent turn settles and deduplicates lifecycle",
+    () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("pi-subagent-thread");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockPiWrapper({ PI_MOCK_SUBAGENTS: "1" }),
+        );
+        const adapter = yield* makeTestAdapter(wrapperPath);
+        const runtimeEvents: ProviderRuntimeEvent[] = [];
+        const taskCompleted = yield* Deferred.make<void>();
+        const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => runtimeEvents.push(event)).pipe(
+            Effect.andThen(
+              event.type === "task.completed"
+                ? Deferred.succeed(taskCompleted, undefined)
+                : Effect.void,
+            ),
+          ),
+        ).pipe(Effect.forkChild);
+
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input: "spawn a child", attachments: [] });
+        yield* Deferred.await(taskCompleted);
+        yield* Fiber.interrupt(runtimeEventsFiber);
+
+        const started = runtimeEvents.filter((event) => event.type === "task.started");
+        const progress = runtimeEvents.filter((event) => event.type === "task.progress");
+        const completed = runtimeEvents.filter((event) => event.type === "task.completed");
+        assert.equal(started.length, 1);
+        assert.equal(progress.length, 1);
+        assert.equal(completed.length, 1);
+        assert.isTrue(
+          runtimeEvents.findIndex((event) => event.type === "turn.completed") <
+            runtimeEvents.findIndex((event) => event.type === "task.progress"),
+        );
+        const start = started[0];
+        if (start?.type === "task.started") {
+          assert.match(start.payload.taskId, /^pi:mock-/);
+          assert.equal(start.payload.taskType, "local_agent");
+          assert.equal(start.payload.role, "pi");
+          assert.equal(start.payload.toolUseId, "subagent-tool-1");
+          assert.deepEqual(start.payload.runHandles, {
+            runId: `${decodeURIComponent(start.payload.taskId.split(":")[1] ?? "")}:sa-1`,
+            transcriptDir: "/tmp/mock-child",
+          });
+          assert.isTrue(start.payload.timelineBypass);
+        }
+        const terminal = completed[0];
+        if (terminal?.type === "task.completed") {
+          assert.equal(terminal.payload.status, "completed");
+          assert.equal(terminal.payload.typedUsage?.totalTokens, 180);
+        }
+
+        yield* adapter.stopSession(threadId);
+      }),
+  );
+
+  it.effect("terminates an idle Pi session to stop live extension children", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-idle-subagent-stop");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({
+          PI_MOCK_SUBAGENTS: "1",
+          PI_MOCK_SUBAGENT_HANG: "1",
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const taskStarted = yield* Deferred.make<void>();
+      const sessionExited = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type === "task.started") yield* Deferred.succeed(taskStarted, undefined);
+          if (event.type === "session.exited") yield* Deferred.succeed(sessionExited, undefined);
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "spawn a child", attachments: [] });
+      yield* Deferred.await(taskStarted);
+      yield* adapter.interruptTurn(threadId);
+      yield* Deferred.await(sessionExited);
+      assert.isFalse(yield* adapter.hasSession(threadId));
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+    }),
+  );
+
+  it.effect("uses the bridge run id to avoid child-id collisions across Pi sessions", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-subagent-session-identity");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_SUBAGENTS: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const taskIds: string[] = [];
+      const sawSecondStart = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          if (event.type !== "task.started") return;
+          taskIds.push(event.payload.taskId);
+          if (taskIds.length >= 2) yield* Deferred.succeed(sawSecondStart, undefined);
+        }),
+      ).pipe(Effect.forkChild);
+
+      for (const input of ["first session", "second session"]) {
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input, attachments: [] });
+      }
+      yield* Deferred.await(sawSecondStart);
+      assert.equal(taskIds.length, 2);
+      assert.notEqual(taskIds[0], taskIds[1]);
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("kills the Pi child process when a session stops", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("pi-stop-session-close");

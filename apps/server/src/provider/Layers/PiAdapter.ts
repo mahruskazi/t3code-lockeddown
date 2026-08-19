@@ -30,11 +30,13 @@ import {
   ProviderInstanceId,
   RuntimeItemId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type ThreadId,
   type ThreadTokenUsageSnapshot,
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -74,11 +76,15 @@ import {
   parsePiSessionState,
   parsePiToolExecution,
   parseT3PiApprovalTitle,
+  parseT3PiSubagentEvent,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
+  T3_PI_RUNTIME_MODE_ENV,
+  T3_PI_SUBAGENT_BRIDGE_ENV,
   usageSnapshotFromPiUsage,
   type PiExtensionUiRequest,
   type PiRpcEvent,
+  type T3PiSubagentEvent,
 } from "../piRpc/PiRpcModel.ts";
 import { makePiRpcProcess, type PiRpcProcess } from "../piRpc/PiRpcProcess.ts";
 import { T3_PI_APPROVAL_MODE_ENV } from "../piRpc/PiExtensionSource.ts";
@@ -90,6 +96,8 @@ const PROVIDER = ProviderDriverKind.make("pi");
 const GET_STATE_TIMEOUT = Duration.seconds(15);
 /** Prompt acks may only arrive at end-of-turn; keep this effectively open. */
 const PROMPT_REQUEST_TIMEOUT = Duration.hours(24);
+const PI_SUBAGENT_PROGRESS_MIN_INTERVAL_MS = 1_000;
+const PI_SUBAGENT_MAX_TASKS_PER_SESSION = 256;
 
 export interface PiAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -114,6 +122,35 @@ interface PendingUserInput {
   readonly resolution: Deferred.Deferred<PendingUserInputResolution>;
 }
 
+interface PiSubagentTaskState {
+  readonly taskId: RuntimeTaskId;
+  readonly turnId: TurnId | undefined;
+  readonly title: string;
+  readonly role: "pi" | "codex";
+  readonly toolUseId: string | undefined;
+  readonly runHandles: { readonly runId: string; readonly transcriptDir?: string } | undefined;
+  model: string | undefined;
+  effort: string | undefined;
+  terminal: boolean;
+  lastProgress: Extract<T3PiSubagentEvent, { readonly kind: "progress" }> | undefined;
+  lastProgressAt: number | undefined;
+}
+
+function samePiSubagentProgress(
+  left: Extract<T3PiSubagentEvent, { readonly kind: "progress" }> | undefined,
+  right: Extract<T3PiSubagentEvent, { readonly kind: "progress" }>,
+) {
+  return (
+    left?.status === right.status &&
+    left.lastToolName === right.lastToolName &&
+    left.summary === right.summary &&
+    left.usedTokens === right.usedTokens &&
+    left.contextWindow === right.contextWindow &&
+    left.model === right.model &&
+    left.effort === right.effort
+  );
+}
+
 type TurnSettlement =
   | { readonly state: "completed" }
   | { readonly state: "cancelled" }
@@ -136,6 +173,8 @@ interface PiSessionContext {
   readonly activeContentItems: Map<number, { itemId: string; reasoning: boolean }>;
   /** toolCallId → args from `tool_execution_start`; update/end events omit them. */
   readonly toolArgsByCallId: Map<string, Record<string, unknown>>;
+  /** Versioned extension lifecycle state, independent of the parent turn. */
+  readonly subagentTasks: Map<RuntimeTaskId, PiSubagentTaskState>;
   assistantItemSeq: number;
   lastUsage: ThreadTokenUsageSnapshot | undefined;
   currentModelSlug: string | undefined;
@@ -322,6 +361,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
         ctx.turnDone.clear();
         yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
+        ctx.subagentTasks.clear();
         sessions.delete(ctx.threadId);
         yield* offerRuntimeEvent({
           type: "session.exited",
@@ -331,6 +371,139 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           payload: { exitKind: "graceful" },
         });
       });
+
+    const handleT3PiSubagentEvent = Effect.fn("PiAdapter.handleT3PiSubagentEvent")(function* (
+      ctx: PiSessionContext,
+      event: T3PiSubagentEvent,
+    ) {
+      const taskId = RuntimeTaskId.make(
+        `pi:${encodeURIComponent(event.bridgeRunId)}:${encodeURIComponent(event.childId)}`,
+      );
+      const existing = ctx.subagentTasks.get(taskId);
+
+      if (event.kind === "started") {
+        if (existing || ctx.subagentTasks.size >= PI_SUBAGENT_MAX_TASKS_PER_SESSION) return;
+        const runHandles = event.transcriptPath
+          ? {
+              runId: `${event.bridgeRunId}:${event.childId}`,
+              transcriptDir: path.dirname(event.transcriptPath),
+            }
+          : undefined;
+        const state: PiSubagentTaskState = {
+          taskId,
+          turnId: ctx.activeTurnId,
+          title: event.title,
+          role: event.harness,
+          toolUseId: event.toolUseId,
+          runHandles,
+          model: event.model,
+          effort: event.effort,
+          terminal: false,
+          lastProgress: undefined,
+          lastProgressAt: undefined,
+        };
+        ctx.subagentTasks.set(taskId, state);
+        yield* offerRuntimeEvent({
+          type: "task.started",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          ...(state.turnId ? { turnId: state.turnId } : {}),
+          payload: {
+            taskId,
+            taskType: "local_agent",
+            description: state.title,
+            title: state.title,
+            role: state.role,
+            ...(state.model ? { model: state.model } : {}),
+            ...(state.effort ? { effort: state.effort } : {}),
+            ...(state.toolUseId ? { toolUseId: state.toolUseId } : {}),
+            ...(state.runHandles ? { runHandles: state.runHandles } : {}),
+            timelineBypass: true,
+          },
+        });
+        return;
+      }
+
+      if (!existing || existing.terminal) return;
+      const linkage = () =>
+        ({
+          taskType: "local_agent",
+          title: existing.title,
+          role: existing.role,
+          ...(existing.model ? { model: existing.model } : {}),
+          ...(existing.effort ? { effort: existing.effort } : {}),
+          ...(existing.toolUseId ? { toolUseId: existing.toolUseId } : {}),
+          ...(existing.runHandles ? { runHandles: existing.runHandles } : {}),
+          timelineBypass: true,
+        }) as const;
+      const turnLink = existing.turnId ? { turnId: existing.turnId } : {};
+
+      if (event.kind === "progress") {
+        existing.model = event.model ?? existing.model;
+        existing.effort = event.effort ?? existing.effort;
+        const observedAt = yield* Clock.currentTimeMillis;
+        if (
+          samePiSubagentProgress(existing.lastProgress, event) ||
+          (existing.lastProgressAt !== undefined &&
+            observedAt - existing.lastProgressAt < PI_SUBAGENT_PROGRESS_MIN_INTERVAL_MS)
+        ) {
+          return;
+        }
+        existing.lastProgress = event;
+        existing.lastProgressAt = observedAt;
+        const typedUsage =
+          event.usedTokens !== undefined ? { totalTokens: event.usedTokens } : undefined;
+        yield* offerRuntimeEvent({
+          type: "task.progress",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          ...turnLink,
+          payload: {
+            taskId,
+            description: event.summary ?? (event.status === "waiting" ? "Waiting" : "Running"),
+            status: event.status,
+            ...(event.summary ? { summary: event.summary } : {}),
+            ...(event.lastToolName ? { lastToolName: event.lastToolName } : {}),
+            ...(event.usedTokens !== undefined || event.contextWindow !== undefined
+              ? {
+                  usage: {
+                    ...(event.usedTokens !== undefined ? { usedTokens: event.usedTokens } : {}),
+                    ...(event.contextWindow !== undefined
+                      ? { contextWindow: event.contextWindow }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(typedUsage ? { typedUsage } : {}),
+            ...linkage(),
+          },
+        });
+        return;
+      }
+
+      existing.terminal = true;
+      const typedUsage =
+        event.usedTokens !== undefined ? { totalTokens: event.usedTokens } : undefined;
+      const terminalSummary =
+        event.status === "failed" ? (event.error ?? event.summary) : (event.summary ?? event.error);
+      yield* offerRuntimeEvent({
+        type: "task.completed",
+        ...(yield* makeEventStamp()),
+        provider: PROVIDER,
+        threadId: ctx.threadId,
+        ...turnLink,
+        payload: {
+          taskId,
+          status: event.status,
+          ...(terminalSummary ? { summary: terminalSummary } : {}),
+          ...(event.usedTokens !== undefined ? { usage: { usedTokens: event.usedTokens } } : {}),
+          ...(typedUsage ? { typedUsage } : {}),
+          ...linkage(),
+        },
+      });
+    });
 
     // ── Extension UI handling ─────────────────────────────────────────
 
@@ -497,6 +670,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               }).pipe(Effect.ignore);
             }
             ctx.turnDone.clear();
+            ctx.subagentTasks.clear();
             sessions.delete(ctx.threadId);
             yield* Effect.ignore(Scope.close(ctx.scope, Exit.void));
             yield* offerRuntimeEvent({
@@ -512,6 +686,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             return;
           }
           case "extension_ui_request": {
+            const subagentEvent = parseT3PiSubagentEvent(event);
+            if (subagentEvent) {
+              yield* logNative(ctx.threadId, "t3_subagent", subagentEvent);
+              yield* handleT3PiSubagentEvent(ctx, subagentEvent);
+              return;
+            }
             const ui = parsePiExtensionUiRequest(event);
             if (!ui) return;
             yield* logNative(ctx.threadId, "extension_ui_request", event);
@@ -781,6 +961,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           const environment: NodeJS.ProcessEnv = {
             ...(options?.environment ?? process.env),
             [T3_PI_APPROVAL_MODE_ENV]: input.runtimeMode === "full-access" ? "off" : "gated",
+            [T3_PI_SUBAGENT_BRIDGE_ENV]: "v1",
+            [T3_PI_RUNTIME_MODE_ENV]: input.runtimeMode,
           };
 
           const rpc = yield* makePiRpcProcess({
@@ -874,6 +1056,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             interruptedTurnIds: new Set(),
             activeContentItems: new Map(),
             toolArgsByCallId: new Map(),
+            subagentTasks: new Map(),
             assistantItemSeq: 0,
             lastUsage: undefined,
             currentModelSlug: boundModelSlug,
@@ -1097,6 +1280,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           const interruptedTurnId = turnId ?? activeTurnId;
           yield* settlePendingApprovalsAsCancelled(ctx.pendingApprovals);
           yield* settlePendingUserInputsAsCancelled(ctx.pendingUserInputs);
+          if (interruptedTurnId === undefined) {
+            // Pi 0.83 exposes no idle-abort extension hook. Terminating the
+            // provider session is the only truthful way to stop detached
+            // extension children and lets ingestion interrupt their tasks.
+            yield* stopSessionInternal(ctx);
+            return;
+          }
           yield* ctx.rpc.send({ type: "abort" }).pipe(Effect.ignore);
           if (interruptedTurnId !== undefined) {
             ctx.interruptedTurnIds.add(interruptedTurnId);

@@ -14,6 +14,7 @@
  * @module provider/piRpc/PiRpcModel
  */
 import type { ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 // ── Errors ────────────────────────────────────────────────────────────
@@ -537,6 +538,122 @@ export function parsePiExtensionUiRequest(event: PiRpcEvent): PiExtensionUiReque
     message: stringField(event, "message"),
     options,
   };
+}
+
+export const T3_PI_SUBAGENT_EVENT_PREFIX = "t3-subagent:v1:";
+export const T3_PI_SUBAGENT_BRIDGE_ENV = "T3_PI_SUBAGENT_BRIDGE";
+export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
+const T3_PI_SUBAGENT_MAX_MESSAGE_LENGTH = 16_384;
+const T3PiSubagentId = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(128),
+);
+const T3PiSubagentTitle = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(160),
+);
+const T3PiSubagentPath = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(4_096),
+);
+const T3PiSubagentModel = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(256),
+);
+const T3PiSubagentEffort = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(32),
+);
+const T3PiSubagentSummary = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(512),
+);
+const T3PiSubagentError = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(1_024),
+);
+const T3PiSubagentToolName = Schema.String.check(
+  Schema.isTrimmed(),
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(128),
+);
+const T3PiSubagentCount = Schema.Int.check(
+  Schema.isBetween({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+);
+
+const T3PiSubagentIdentity = {
+  bridgeRunId: T3PiSubagentId,
+  childId: T3PiSubagentId,
+} as const;
+
+const T3PiSubagentStarted = Schema.Struct({
+  kind: Schema.Literal("started"),
+  ...T3PiSubagentIdentity,
+  title: T3PiSubagentTitle,
+  harness: Schema.Literals(["pi", "codex"]),
+  cwd: T3PiSubagentPath,
+  model: Schema.optional(T3PiSubagentModel),
+  effort: Schema.optional(T3PiSubagentEffort),
+  toolUseId: Schema.optional(T3PiSubagentModel),
+  transcriptPath: Schema.optional(T3PiSubagentPath),
+});
+
+const T3PiSubagentProgress = Schema.Struct({
+  kind: Schema.Literal("progress"),
+  ...T3PiSubagentIdentity,
+  status: Schema.Literals(["running", "waiting"]),
+  lastToolName: Schema.optional(T3PiSubagentToolName),
+  summary: Schema.optional(T3PiSubagentSummary),
+  usedTokens: Schema.optional(T3PiSubagentCount),
+  contextWindow: Schema.optional(T3PiSubagentCount),
+  model: Schema.optional(T3PiSubagentModel),
+  effort: Schema.optional(T3PiSubagentEffort),
+});
+
+const T3PiSubagentCompleted = Schema.Struct({
+  kind: Schema.Literal("completed"),
+  ...T3PiSubagentIdentity,
+  status: Schema.Literals(["completed", "failed", "stopped"]),
+  summary: Schema.optional(T3PiSubagentSummary),
+  error: Schema.optional(T3PiSubagentError),
+  usedTokens: Schema.optional(T3PiSubagentCount),
+});
+
+export const T3PiSubagentEvent = Schema.Union([
+  T3PiSubagentStarted,
+  T3PiSubagentProgress,
+  T3PiSubagentCompleted,
+]);
+export type T3PiSubagentEvent = typeof T3PiSubagentEvent.Type;
+
+const decodeT3PiSubagentEvent = Schema.decodeUnknownOption(T3PiSubagentEvent);
+
+/** Parse only the exact, opt-in notify transport used by the Pi subagents extension. */
+export function parseT3PiSubagentEvent(event: PiRpcEvent): T3PiSubagentEvent | undefined {
+  const ui = parsePiExtensionUiRequest(event);
+  const message = ui?.message;
+  if (
+    ui?.method !== "notify" ||
+    !message?.startsWith(T3_PI_SUBAGENT_EVENT_PREFIX) ||
+    message.length > T3_PI_SUBAGENT_MAX_MESSAGE_LENGTH
+  ) {
+    return undefined;
+  }
+  try {
+    const decoded = decodeT3PiSubagentEvent(
+      JSON.parse(message.slice(T3_PI_SUBAGENT_EVENT_PREFIX.length)),
+    );
+    return Option.getOrUndefined(decoded);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
