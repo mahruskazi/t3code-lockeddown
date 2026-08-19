@@ -10,6 +10,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
@@ -19,6 +20,12 @@ interface HarnessOptions {
   readonly managed?: boolean;
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
+  /**
+   * Pre-provision the pinned runtime on disk. This fork never downloads
+   * runtimes from npm, so an update can only proceed against a runtime that
+   * is already there.
+   */
+  readonly seedRuntime?: boolean;
 }
 
 const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
@@ -27,6 +34,12 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
+  if (options.seedRuntime ?? true) {
+    const runtime = pinnedRuntimePaths(path, baseDir, "1.1.0");
+    yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
+    yield* fs.writeFileString(runtime.entryPath, "export {};\n");
+    yield* fs.writeFileString(runtime.sentinelPath, "1.1.0\n");
+  }
   const order: string[] = [];
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
@@ -95,7 +108,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
 });
 
 it.layer(NodeServices.layer)("server self update", (it) => {
-  it.effect("stages and preflights before asking the launcher for an update ID", () =>
+  it.effect("preflights a pre-provisioned runtime before asking for an update ID", () =>
     Effect.gen(function* () {
       const { selfUpdate, order } = yield* makeHarness();
       expect(yield* selfUpdate.update({ targetVersion: "1.1.0" })).toEqual({
@@ -103,7 +116,18 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         method: "boot-service",
         updateId: "launcher-id",
       });
-      expect(order).toEqual(["install", "preflight", "accept"]);
+      // Locked-down fork: "install" must never appear here. The fake runner
+      // records it if the npm install path is ever restored.
+      expect(order).toEqual(["preflight", "accept"]);
+    }),
+  );
+
+  it.effect("refuses to update when the pinned runtime is not pre-provisioned", () =>
+    Effect.gen(function* () {
+      const { selfUpdate, order } = yield* makeHarness({ seedRuntime: false });
+      const error = yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip);
+      expect(error.reason).toBe("Could not prepare t3@1.1.0.");
+      expect(order).toEqual([]);
     }),
   );
 
