@@ -85,6 +85,7 @@ import {
   T3_PI_RUNTIME_MODE_ENV,
   T3_PI_SUBAGENT_BRIDGE_ENV,
   usageSnapshotFromPiUsage,
+  usageSnapshotFromPiSessionStats,
   type PiExtensionUiRequest,
   type PiRpcEvent,
   type T3PiSubagentEvent,
@@ -97,6 +98,7 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 const PROVIDER = ProviderDriverKind.make("pi");
 
 const GET_STATE_TIMEOUT = Duration.seconds(15);
+const GET_SESSION_STATS_TIMEOUT = Duration.seconds(2);
 /** Prompt acks may only arrive at end-of-turn; keep this effectively open. */
 const PROMPT_REQUEST_TIMEOUT = Duration.hours(24);
 const PI_SUBAGENT_PROGRESS_MIN_INTERVAL_MS = 1_000;
@@ -180,6 +182,7 @@ interface PiSessionContext {
   readonly subagentTasks: Map<RuntimeTaskId, PiSubagentTaskState>;
   assistantItemSeq: number;
   lastUsage: ThreadTokenUsageSnapshot | undefined;
+  readonly compactsAutomatically: boolean;
   currentModelSlug: string | undefined;
   sessionFile: string | undefined;
   stopped: boolean;
@@ -929,6 +932,27 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             return;
           }
           case "message_end": {
+            const lastUsage = ctx.lastUsage;
+            const statsUsage = yield* ctx.rpc
+              .request({ type: "get_session_stats" }, { timeout: GET_SESSION_STATS_TIMEOUT })
+              .pipe(
+                Effect.map((response) =>
+                  usageSnapshotFromPiSessionStats(
+                    response.data,
+                    lastUsage,
+                    ctx.compactsAutomatically,
+                  ),
+                ),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Failed to read Pi context-window usage.", {
+                    cause,
+                    threadId: ctx.threadId,
+                  }).pipe(Effect.as(undefined)),
+                ),
+              );
+            if (statsUsage) {
+              ctx.lastUsage = statsUsage;
+            }
             if (ctx.lastUsage) {
               yield* offerRuntimeEvent({
                 type: "thread.token-usage.updated",
@@ -1108,6 +1132,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             subagentTasks: new Map(),
             assistantItemSeq: 0,
             lastUsage: undefined,
+            compactsAutomatically: state.autoCompactionEnabled,
             currentModelSlug: boundModelSlug,
             sessionFile: state.sessionFile,
             stopped: false,

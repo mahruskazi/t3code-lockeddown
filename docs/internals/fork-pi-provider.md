@@ -110,9 +110,14 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
 - **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.
   Session files stay in Pi's own session dir, so `pi` in a terminal sees the
   same history.
-- **Usage.** `message_update.usage` totals are tracked and published as
-  `thread.token-usage.updated` on message end and turn settlement (not per
-  delta, to keep websocket volume down).
+- **Usage.** `message_update.usage` totals are tracked, then `get_session_stats`
+  supplies Pi's active post-compaction token count and model context window.
+  The combined snapshot is published as `thread.token-usage.updated` on
+  message end and turn settlement (not per delta, to keep websocket volume
+  down).
+- **Skills.** The provider probe reads `get_commands`, maps loaded skill
+  commands into the provider snapshot, and exposes them to the composer's `$`
+  picker.
 
 ## Known limitations (v1)
 

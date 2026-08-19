@@ -15,6 +15,7 @@
  */
 import type {
   ProviderUserInputAnswers,
+  ServerProviderSkill,
   ThreadTokenUsageSnapshot,
   UserInputQuestion,
 } from "@t3tools/contracts";
@@ -214,6 +215,44 @@ export function parsePiAvailableModels(data: unknown): ReadonlyArray<PiCatalogMo
   return models;
 }
 
+/** Parse loaded skills from Pi's `get_commands` response payload. */
+export function parsePiAvailableSkills(data: unknown): ReadonlyArray<ServerProviderSkill> {
+  const entries = isRecord(data) && Array.isArray(data.commands) ? data.commands : data;
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const skills: Array<ServerProviderSkill> = [];
+  for (const entry of entries) {
+    if (!isRecord(entry) || entry.source !== "skill") {
+      continue;
+    }
+
+    const rawName = stringField(entry, "name")?.trim();
+    const name = rawName?.startsWith("skill:") ? rawName.slice("skill:".length).trim() : rawName;
+    const sourceInfo = isRecord(entry.sourceInfo) ? entry.sourceInfo : undefined;
+    const path =
+      stringField(sourceInfo ?? {}, "path")?.trim() ?? stringField(entry, "path")?.trim();
+    if (!name || !path || seen.has(name)) {
+      continue;
+    }
+
+    seen.add(name);
+    const description = stringField(entry, "description")?.trim();
+    const scope =
+      stringField(sourceInfo ?? {}, "scope")?.trim() ?? stringField(entry, "location")?.trim();
+    skills.push({
+      name,
+      path,
+      enabled: true,
+      ...(description ? { description } : {}),
+      ...(scope ? { scope } : {}),
+    });
+  }
+  return skills;
+}
+
 // ── Session state ─────────────────────────────────────────────────────
 
 export interface PiSessionState {
@@ -221,6 +260,7 @@ export interface PiSessionState {
   readonly sessionFile: string | undefined;
   readonly modelSlug: string | undefined;
   readonly isStreaming: boolean;
+  readonly autoCompactionEnabled: boolean;
 }
 
 /** Parse the `get_state` response payload. */
@@ -231,6 +271,7 @@ export function parsePiSessionState(data: unknown): PiSessionState {
       sessionFile: undefined,
       modelSlug: undefined,
       isStreaming: false,
+      autoCompactionEnabled: false,
     };
   }
   return {
@@ -238,6 +279,7 @@ export function parsePiSessionState(data: unknown): PiSessionState {
     sessionFile: stringField(data, "sessionFile"),
     modelSlug: piModelSlugFromRecord(data.model),
     isStreaming: data.isStreaming === true,
+    autoCompactionEnabled: data.autoCompactionEnabled === true,
   };
 }
 
@@ -326,6 +368,57 @@ export function usageSnapshotFromPiUsage(value: unknown): ThreadTokenUsageSnapsh
     ...(contextWindow !== undefined && contextWindow > 0
       ? { maxTokens: Math.round(contextWindow) }
       : {}),
+  };
+}
+
+/**
+ * Map Pi's `get_session_stats` payload to the active context-window snapshot.
+ * The `tokens` record is cumulative, while `contextUsage.tokens` is the
+ * post-compaction context value that Pi renders in its own footer.
+ */
+export function usageSnapshotFromPiSessionStats(
+  value: unknown,
+  lastUsage?: ThreadTokenUsageSnapshot,
+  compactsAutomatically?: boolean,
+): ThreadTokenUsageSnapshot | undefined {
+  if (!isRecord(value) || !isRecord(value.contextUsage)) {
+    return undefined;
+  }
+
+  const contextWindow = numberField(value.contextUsage, "contextWindow");
+  const contextTokens = numberField(value.contextUsage, "tokens");
+  if (contextWindow === undefined || contextWindow <= 0 || contextTokens === undefined) {
+    return undefined;
+  }
+
+  const maxTokens = Math.round(contextWindow);
+  const usedTokens = Math.min(maxTokens, Math.max(0, Math.round(contextTokens)));
+  const tokens = isRecord(value.tokens) ? value.tokens : undefined;
+  const totalProcessedTokens = tokens ? numberField(tokens, "total") : undefined;
+  return {
+    usedTokens,
+    maxTokens,
+    ...(totalProcessedTokens !== undefined && totalProcessedTokens > usedTokens
+      ? { totalProcessedTokens: Math.round(totalProcessedTokens) }
+      : {}),
+    ...(lastUsage?.inputTokens !== undefined ? { inputTokens: lastUsage.inputTokens } : {}),
+    ...(lastUsage?.cachedInputTokens !== undefined
+      ? { cachedInputTokens: lastUsage.cachedInputTokens }
+      : {}),
+    ...(lastUsage?.outputTokens !== undefined ? { outputTokens: lastUsage.outputTokens } : {}),
+    ...(lastUsage?.reasoningOutputTokens !== undefined
+      ? { reasoningOutputTokens: lastUsage.reasoningOutputTokens }
+      : {}),
+    ...(lastUsage?.usedTokens !== undefined ? { lastUsedTokens: lastUsage.usedTokens } : {}),
+    ...(lastUsage?.inputTokens !== undefined ? { lastInputTokens: lastUsage.inputTokens } : {}),
+    ...(lastUsage?.cachedInputTokens !== undefined
+      ? { lastCachedInputTokens: lastUsage.cachedInputTokens }
+      : {}),
+    ...(lastUsage?.outputTokens !== undefined ? { lastOutputTokens: lastUsage.outputTokens } : {}),
+    ...(lastUsage?.reasoningOutputTokens !== undefined
+      ? { lastReasoningOutputTokens: lastUsage.reasoningOutputTokens }
+      : {}),
+    ...(compactsAutomatically !== undefined ? { compactsAutomatically } : {}),
   };
 }
 
