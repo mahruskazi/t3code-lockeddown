@@ -32,6 +32,7 @@ import {
   RuntimeRequestId,
   type ThreadId,
   type ThreadTokenUsageSnapshot,
+  type UserInputQuestion,
   TurnId,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
@@ -65,6 +66,7 @@ import {
   buildPiToolCallData,
   canonicalRequestTypeForPiTool,
   detailForPiToolCall,
+  encodeT3PiUserInputResponse,
   itemTypeForPiTool,
   PI_PROCESS_EXITED_EVENT,
   PI_RESUME_VERSION,
@@ -74,6 +76,7 @@ import {
   parsePiSessionState,
   parsePiToolExecution,
   parseT3PiApprovalTitle,
+  parseT3PiUserInputTitle,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
   usageSnapshotFromPiUsage,
@@ -472,6 +475,49 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           : yield* respondUi(ctx, ui.id, { value });
       });
 
+    /** Structured Pi extension questions become one first-class T3 prompt. */
+    const handleStructuredUserInputRequest = (
+      ctx: PiSessionContext,
+      ui: PiExtensionUiRequest,
+      questions: ReadonlyArray<UserInputQuestion>,
+    ) =>
+      Effect.gen(function* () {
+        const requestId = ApprovalRequestId.make(yield* randomUUIDv4);
+        const runtimeRequestId = RuntimeRequestId.make(requestId);
+        const resolution = yield* Deferred.make<PendingUserInputResolution>();
+        const turnId = ctx.activeTurnId;
+        ctx.pendingUserInputs.set(requestId, { uiRequestId: ui.id, resolution });
+        yield* offerRuntimeEvent({
+          type: "user-input.requested",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          requestId: runtimeRequestId,
+          payload: { questions },
+          raw: {
+            source: "pi.rpc.extension",
+            method: "extension_ui_request",
+            payload: ui,
+          },
+        });
+        const resolved = yield* Deferred.await(resolution);
+        ctx.pendingUserInputs.delete(requestId);
+        const answers = resolved._tag === "answered" ? resolved.answers : {};
+        yield* offerRuntimeEvent({
+          type: "user-input.resolved",
+          ...(yield* makeEventStamp()),
+          provider: PROVIDER,
+          threadId: ctx.threadId,
+          turnId,
+          requestId: runtimeRequestId,
+          payload: { answers },
+        });
+        return resolved._tag === "cancelled"
+          ? yield* respondUi(ctx, ui.id, { cancelled: true })
+          : yield* respondUi(ctx, ui.id, { value: encodeT3PiUserInputResponse(answers) });
+      });
+
     // ── Event pump ────────────────────────────────────────────────────
 
     const handlePumpEvent = (ctx: PiSessionContext, event: PiRpcEvent) =>
@@ -516,9 +562,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             if (!ui) return;
             yield* logNative(ctx.threadId, "extension_ui_request", event);
             const approval = parseT3PiApprovalTitle(ui.title);
+            const userInput = parseT3PiUserInputTitle(ui.title);
             const handler = approval
               ? handleApprovalUiRequest(ctx, ui, approval)
-              : handleForeignUiRequest(ctx, ui);
+              : userInput && ui.method === "select"
+                ? handleStructuredUserInputRequest(ctx, ui, userInput.questions)
+                : handleForeignUiRequest(ctx, ui);
             // Blocking dialogs must not stall the pump.
             yield* handler.pipe(
               Effect.catchCause((cause) =>
