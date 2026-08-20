@@ -142,6 +142,9 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
       const usage = runtimeEvents.find((e) => e.type === "thread.token-usage.updated");
       if (usage?.type === "thread.token-usage.updated") {
         assert.equal(usage.payload.usage.usedTokens, 178);
+        assert.equal(usage.payload.usage.maxTokens, 1_000);
+        assert.equal(usage.payload.usage.lastUsedTokens, 178);
+        assert.isTrue(usage.payload.usage.compactsAutomatically);
       }
 
       const completed = runtimeEvents.find((e) => e.type === "turn.completed");

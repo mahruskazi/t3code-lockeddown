@@ -17,6 +17,7 @@ import {
   type PiSettings,
   type ServerProvider,
   type ServerProviderModel,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
@@ -42,7 +43,7 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { parsePiAvailableModels } from "../piRpc/PiRpcModel.ts";
+import { parsePiAvailableModels, parsePiAvailableSkills } from "../piRpc/PiRpcModel.ts";
 import { makePiRpcProcess } from "../piRpc/PiRpcProcess.ts";
 
 const PI_PRESENTATION = {
@@ -132,7 +133,7 @@ const runPiVersionCommand = (
     );
   });
 
-const discoverPiModels = (piSettings: PiSettings, environment: NodeJS.ProcessEnv = process.env) =>
+const discoverPiCatalog = (piSettings: PiSettings, environment: NodeJS.ProcessEnv = process.env) =>
   Effect.gen(function* () {
     const rpc = yield* makePiRpcProcess({
       binaryPath: piSettings.binaryPath,
@@ -140,11 +141,29 @@ const discoverPiModels = (piSettings: PiSettings, environment: NodeJS.ProcessEnv
       cwd: process.cwd(),
       env: environment,
     });
-    const response = yield* rpc.request(
-      { type: "get_available_models" },
-      { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
+    const [modelsResponse, skills] = yield* Effect.all(
+      [
+        rpc.request(
+          { type: "get_available_models" },
+          { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
+        ),
+        rpc
+          .request(
+            { type: "get_commands" },
+            { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
+          )
+          .pipe(
+            Effect.map((response) => parsePiAvailableSkills(response.data)),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Pi skill discovery failed", {
+                errorTag: causeErrorTag(cause),
+              }).pipe(Effect.as<ReadonlyArray<ServerProviderSkill>>([])),
+            ),
+          ),
+      ],
+      { concurrency: "unbounded" },
     );
-    return parsePiAvailableModels(response.data).map(
+    const models = parsePiAvailableModels(modelsResponse.data).map(
       (model): ServerProviderModel => ({
         slug: model.slug,
         name: model.name,
@@ -152,6 +171,7 @@ const discoverPiModels = (piSettings: PiSettings, environment: NodeJS.ProcessEnv
         capabilities: EMPTY_CAPABILITIES,
       }),
     );
+    return { models, skills } as const;
   }).pipe(Effect.scoped);
 
 export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function* (
@@ -243,7 +263,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const discoveryExit = yield* discoverPiModels(piSettings, environment).pipe(
+  const discoveryExit = yield* discoverPiCatalog(piSettings, environment).pipe(
     Effect.timeoutOption(PI_MODEL_DISCOVERY_TIMEOUT_MS + 5_000),
     Effect.exit,
   );
@@ -285,7 +305,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const discoveredModels = discoveryExit.value.value;
+  const { models: discoveredModels, skills } = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
       ? piModelsFromSettings(piSettings.customModels, discoveredModels)
@@ -296,6 +316,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     enabled: piSettings.enabled,
     checkedAt,
     models,
+    skills,
     probe: {
       installed: true,
       version,
