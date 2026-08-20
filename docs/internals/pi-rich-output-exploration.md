@@ -16,24 +16,24 @@ the clients already have. The runtime event vocabulary
 mobile, and ingestion/persistence already handle all of it. The Pi adapter
 currently emits a conservative subset:
 
-| Emits today                              | Renders as                                    |
-| ---------------------------------------- | --------------------------------------------- |
-| `item.*` + `content.delta`               | assistant/reasoning streaming                  |
-| `item.*` for `tool_execution_*`          | tool rows via `deriveToolActivityPresentation` |
-| `request.opened/resolved`                | approval cards (via the bundled extension)     |
-| `user-input.requested/resolved`          | question cards (`t3-user-input:v1:` bridge)    |
-| `task.*`                                 | Agents surface (`t3-subagent:v1:` bridge)      |
-| `thread.token-usage.updated`             | context meter                                  |
+| Emits today                     | Renders as                                     |
+| ------------------------------- | ---------------------------------------------- |
+| `item.*` + `content.delta`      | assistant/reasoning streaming                  |
+| `item.*` for `tool_execution_*` | tool rows via `deriveToolActivityPresentation` |
+| `request.opened/resolved`       | approval cards (via the bundled extension)     |
+| `user-input.requested/resolved` | question cards (`t3-user-input:v1:` bridge)    |
+| `task.*`                        | Agents surface (`t3-subagent:v1:` bridge)      |
+| `thread.token-usage.updated`    | context meter                                  |
 
 Surfaces that exist downstream but that Pi never feeds:
 
 - **Plan chips + working indicator** — `turn.plan.updated` drives an inline
   per-turn plan chip (`deriveTurnPlans` in `apps/web/src/session-logic.ts`)
   and the sidebar "step 2/5" working line (`ThreadPlanProgress.ts`).
-- **Agents surface** — the T3 side of the subagent bridge shipped (PR #5),
-  but pi-config's subagents extension never gained the publisher, so no
-  `t3-subagent:v1:` notifications are ever emitted. The whole pipeline is
-  dark.
+- **Agents surface** — the T3 side of the subagent bridge shipped (PR #5);
+  the pi-config publisher exists on branch `feat/t3-subagent-bridge` but is
+  not merged, so installed setups emit no `t3-subagent:v1:` notifications
+  yet. See P2.
 - **Work-log rows** — extension `notify` messages (typecheck failures,
   background-job completion, MCP status) are silently dropped by
   `handleForeignUiRequest`.
@@ -63,29 +63,35 @@ handles that). Match the tool by exact name `todo_write`; emit on
 `tool_execution_start` (args are only present there). Pure mapping helper +
 tests belong in `PiRpcModel.ts`.
 
-### P2. Ship the pi-config side of the subagent bridge — pi-config, medium
+### P2. Land the pi-config side of the subagent bridge — pi-config, in review
 
 Everything in [pi-subagents-t3-handoff.md](./pi-subagents-t3-handoff.md) on
 the T3 side is implemented and tested (`parseT3PiSubagentEvent`,
 `handleT3PiSubagentEvent`, `T3_PI_SUBAGENT_BRIDGE=v1` env). The extension
-side was never built: pi-config's `subagents/src/manager.ts` has the read
-model (`SubagentSnapshot` carries id, backend, title, cwd, status, usage,
-errorText — everything the payload schema needs) but no publisher.
+side **exists on pi-config branch `feat/t3-subagent-bridge`** (unmerged):
+`src/t3-bridge.ts` implements the lifecycle publisher (start/throttled
+progress/terminal markers via `ui.notify`), spawn gating on
+`T3_PI_RUNTIME_MODE` (fails closed on unknown modes), the
+`deliverAs: "nextTurn"` hidden-turn fix, a distinct `stopped` status, and
+truthful stop-on-dispose (abort children, wait bounded, publish terminal
+state before scopes close). Payloads were verified against
+`PiRpcModel.ts`'s schemas.
 
-The work, per the handoff doc:
+Before merging, fix one silent-drop bug found in that review: the branch's
+`bounded()` helper trims **then** slices, so a value cut right after a
+space keeps trailing whitespace — and every T3-side field schema requires
+`Schema.isTrimmed()`, so the whole event is dropped. Reproduced against the
+real parser: a >160-char title whose cut lands after a space makes T3 drop
+the `started` marker, and because progress/completed for unknown children
+are ignored, that child never appears in the Agents surface at all. Fix in
+`t3-bridge.ts`: slice first, then trim (`trimmed.slice(0, limit).trim()`);
+applies to every `bounded`/`oneLine` field (title, summary, error,
+lastToolName, model, effort, paths).
 
-1. A lifecycle publisher gated on `process.env.T3_PI_SUBAGENT_BRIDGE === "v1"`
-   that subscribes to the manager read model and emits
-   `ctx.ui.notify("t3-subagent:v1:" + JSON.stringify(event), "info")` —
-   one `started`, throttled `progress` (≥1s apart, already enforced again on
-   the T3 side), one terminal `completed`.
-2. Result delivery via `deliverAs: "nextTurn"` instead of a triggered turn
-   when the bridge env is present (the hidden-turn fix — required).
-3. Runtime-mode enforcement from `T3_PI_RUNTIME_MODE` (reject spawns in
-   approval-required mode for v1).
-
-This is the single biggest payoff: subagents are the flagship pi-config
-extension and currently show up as nothing but a `subagent_spawn` tool row.
+Two things to confirm in the one integrated client pass: `ctx.hasUI` is
+true under `pi --mode rpc` (the publisher is only created when `ui` is set;
+the approval extension's working `ctx.ui.select` suggests yes), and that
+progress markers show up throttled, not per-token.
 
 ### P3. Surface extension notifications in the work log — t3code, small
 
@@ -128,7 +134,7 @@ jobs; the subagent bridge's stop semantics discussion applies unchanged.
   in their expanded body instead of (or alongside) `rawOutput.content`
   prose. This also makes P1 more robust (read todos from the result details
   rather than args). Note `edit-diff-feedback.ts` already appends a unified
-  diff to the result *text*, so edits get some of this for free today via
+  diff to the result _text_, so edits get some of this for free today via
   the `rawOutput.content` preview.
 
 ### P6. Not worth it (for now)
@@ -153,11 +159,11 @@ Not "output", but repeatedly adjacent while reading this code:
 
 ## Suggested order
 
-1. **P1** — self-contained in this repo, immediately visible, no protocol.
-2. **P3** — small, makes extension failures diagnosable from T3.
-3. **P2** — the big one; follow the handoff doc, land pi-config publisher +
-   any T3 stop-semantics follow-up together.
-4. **P4/P5** — after P2 establishes the publisher pattern.
+1. **P2** — fix the truncation bug on pi-config's `feat/t3-subagent-bridge`,
+   run the integrated pass, merge. The rest of the work is already done.
+2. **P1** — self-contained in this repo, immediately visible, no protocol.
+3. **P3** — small, makes extension failures diagnosable from T3.
+4. **P4/P5** — after P2's publisher pattern is merged.
 
 Each lands as its own PR. Verification per repo rules: `PiRpcModel.test.ts`
 for pure parsing/mapping, `PiAdapter.test.ts` against the mock RPC agent
