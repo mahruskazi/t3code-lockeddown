@@ -16,6 +16,8 @@
  *   PI_MOCK_ARGS_LOG_PATH=<file>  write process argv on startup
  *   PI_MOCK_SUBAGENTS=1           emit T3 Pi-subagent lifecycle markers
  *   PI_MOCK_SUBAGENT_HANG=1       leave the emitted child running
+ *   PI_MOCK_TODOS=1               run a todo_write tool call in the turn
+ *   PI_MOCK_NOTIFY=1              emit extension notify events in the turn
  *
  * [fork:pi] Test-only. See docs/internals/fork-pi-provider.md.
  */
@@ -31,6 +33,8 @@ const failPrompt = process.env.PI_MOCK_FAIL_PROMPT === "1";
 const emitSubagents =
   process.env.PI_MOCK_SUBAGENTS === "1" && process.env.T3_PI_SUBAGENT_BRIDGE === "v1";
 const hangSubagent = process.env.PI_MOCK_SUBAGENT_HANG === "1";
+const emitTodos = process.env.PI_MOCK_TODOS === "1";
+const emitNotify = process.env.PI_MOCK_NOTIFY === "1";
 
 if (argsLogPath) {
   NodeFS.writeFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)));
@@ -196,6 +200,42 @@ async function runTurn() {
     if (uiLogPath) {
       NodeFS.appendFileSync(uiLogPath, `${JSON.stringify(answer)}\n`);
     }
+  }
+
+  if (emitTodos) {
+    const todos = [
+      { content: "Write tests", status: "completed" },
+      { content: "Fix the bug", status: "in_progress" },
+      { content: "Ship it", status: "pending" },
+    ];
+    writeLine({
+      type: "tool_execution_start",
+      toolCallId: "todo-call-1",
+      toolName: "todo_write",
+      args: { todos },
+    });
+    await sleep(2);
+    writeLine({
+      type: "tool_execution_end",
+      toolCallId: "todo-call-1",
+      toolName: "todo_write",
+      result: { content: [{ type: "text", text: "Todo list updated: 3 item(s)." }] },
+      isError: false,
+    });
+  }
+
+  if (emitNotify) {
+    const notify = (message: string, notifyType: string) =>
+      writeLine({
+        type: "extension_ui_request",
+        id: `notify-${++notificationId}`,
+        method: "notify",
+        message,
+        notifyType,
+      });
+    notify("Typecheck failed: 2 errors", "warning");
+    notify("Typecheck failed: 2 errors", "warning");
+    notify("Background job finished", "info");
   }
 
   await sleep(5);

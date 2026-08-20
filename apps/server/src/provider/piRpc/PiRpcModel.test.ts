@@ -14,6 +14,7 @@ import {
   kindForPiTool,
   parsePiAgentEnd,
   parsePiAvailableModels,
+  parsePiExtensionNotification,
   parsePiExtensionUiRequest,
   parsePiResumeCursor,
   parsePiSessionState,
@@ -23,6 +24,7 @@ import {
   parseT3PiSubagentEvent,
   parseT3PiUserInputTitle,
   piModelSlugFromRecord,
+  planFromPiTodoWriteArgs,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
   T3_PI_APPROVAL_TITLE_PREFIX,
@@ -213,6 +215,8 @@ describe("tool executions", () => {
     assert.equal(itemTypeForPiTool("edit"), "file_change");
     assert.equal(itemTypeForPiTool("write"), "file_change");
     assert.equal(itemTypeForPiTool("read"), "dynamic_tool_call");
+    assert.equal(itemTypeForPiTool("search"), "web_search");
+    assert.equal(itemTypeForPiTool("scrape"), "web_search");
     assert.equal(canonicalRequestTypeForPiTool("bash"), "exec_command_approval");
     assert.equal(canonicalRequestTypeForPiTool("edit"), "file_change_approval");
     assert.equal(canonicalRequestTypeForPiTool("custom"), "dynamic_tool_call");
@@ -231,7 +235,43 @@ describe("tool executions", () => {
     assert.equal(kindForPiTool("write"), "write");
     assert.equal(kindForPiTool("fetch"), "search");
     assert.equal(kindForPiTool("web_search"), "search");
+    assert.equal(kindForPiTool("search"), "search");
+    assert.equal(kindForPiTool("scrape"), "search");
+    assert.equal(kindForPiTool("fd"), "search");
+    assert.equal(kindForPiTool("rg"), "search");
     assert.isUndefined(kindForPiTool("custom"));
+  });
+
+  it("maps todo_write args onto plan steps", () => {
+    assert.deepEqual(
+      planFromPiTodoWriteArgs({
+        todos: [
+          { content: "Write tests", status: "completed" },
+          { content: "  Fix the bug  ", status: "in_progress" },
+          { content: "Ship it", status: "pending" },
+          { content: "Mystery step", status: "someday" },
+          { content: "   ", status: "pending" },
+          { status: "pending" },
+          "not a record",
+        ],
+      }),
+      [
+        { step: "Write tests", status: "completed" },
+        { step: "Fix the bug", status: "inProgress" },
+        { step: "Ship it", status: "pending" },
+        { step: "Mystery step", status: "pending" },
+      ],
+    );
+    // An explicit empty list clears the plan; non-list args are not a plan.
+    assert.deepEqual(planFromPiTodoWriteArgs({ todos: [] }), []);
+    assert.isUndefined(planFromPiTodoWriteArgs({}));
+    assert.isUndefined(planFromPiTodoWriteArgs({ todos: "all of them" }));
+    // Oversized step content is bounded and stays trimmed after the cut.
+    const long = `${"word ".repeat(60)}tail`;
+    const bounded = planFromPiTodoWriteArgs({ todos: [{ content: long, status: "pending" }] });
+    assert.isDefined(bounded?.[0]);
+    assert.isAtMost(bounded?.[0]?.step.length ?? Infinity, 200);
+    assert.equal(bounded?.[0]?.step, bounded?.[0]?.step.trim());
   });
 
   it("builds client-facing tool call data", () => {
@@ -322,6 +362,48 @@ describe("extension UI protocol", () => {
       assert.deepStrictEqual(ui.options, ["a", "b"]);
     }
     assert.isUndefined(parsePiExtensionUiRequest({ type: "extension_ui_request", method: "x" }));
+  });
+
+  it("parses fire-and-forget notify events, excluding T3 markers", () => {
+    const notify = (body: Record<string, unknown>) => ({
+      type: "extension_ui_request",
+      id: "notify-1",
+      method: "notify",
+      ...body,
+    });
+    assert.deepStrictEqual(
+      parsePiExtensionNotification(notify({ message: "Typecheck failed", notifyType: "warning" })),
+      { message: "Typecheck failed", severity: "warning" },
+    );
+    assert.deepStrictEqual(
+      parsePiExtensionNotification(notify({ message: "  Job crashed  ", severity: "error" })),
+      { message: "Job crashed", severity: "error" },
+    );
+    // Missing or unknown severities degrade to info.
+    assert.deepStrictEqual(parsePiExtensionNotification(notify({ message: "hello" })), {
+      message: "hello",
+      severity: "info",
+    });
+    assert.deepStrictEqual(
+      parsePiExtensionNotification(notify({ message: "hello", notifyType: "loud" })),
+      { message: "hello", severity: "info" },
+    );
+    // Marker transports, blank messages, and non-notify methods are excluded.
+    assert.isUndefined(
+      parsePiExtensionNotification(notify({ message: `${T3_PI_SUBAGENT_EVENT_PREFIX}{}` })),
+    );
+    assert.isUndefined(parsePiExtensionNotification(notify({ message: "t3-future:v2:{}" })));
+    assert.isUndefined(parsePiExtensionNotification(notify({ message: "   " })));
+    assert.isUndefined(parsePiExtensionNotification(notify({})));
+    assert.isUndefined(
+      parsePiExtensionNotification({
+        type: "extension_ui_request",
+        id: "ui-1",
+        method: "select",
+        message: "pick one",
+        options: ["a"],
+      }),
+    );
   });
 
   it("round-trips the T3 approval marker", () => {

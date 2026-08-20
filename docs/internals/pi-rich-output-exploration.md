@@ -42,7 +42,7 @@ Surfaces that exist downstream but that Pi never feeds:
 
 ## Proposals, ranked
 
-### P1. Map `todo_write` to `turn.plan.updated` — t3code only, small
+### P1. Map `todo_write` to `turn.plan.updated` — t3code only, small — **done**
 
 pi-config's `todos.ts` gives the model a Claude-style `todo_write` tool, and
 its full checklist arrives in `tool_execution_start.args.todos`. Today it
@@ -93,7 +93,7 @@ true under `pi --mode rpc` (the publisher is only created when `ui` is set;
 the approval extension's working `ctx.ui.select` suggests yes), and that
 progress markers show up throttled, not per-token.
 
-### P3. Surface extension notifications in the work log — t3code, small
+### P3. Surface extension notifications in the work log — t3code, small — **done**
 
 Pi extensions communicate a lot through `ctx.ui.notify(message, severity)`:
 `typecheck.ts` reports diagnostics after edits, `background-shell` reports
@@ -121,11 +121,11 @@ started/progress/completed shape. The T3 mapping is a near-copy of
 Decide deliberately whether T3's stop-everything should SIGTERM background
 jobs; the subagent bridge's stop semantics discussion applies unchanged.
 
-### P5. Tool presentation polish — t3code, small
+### P5. Tool presentation polish — t3code, small — name mappings done
 
-- `itemTypeForPiTool`/`kindForPiTool`: map pi-config's `search` and `scrape`
-  to `web_search`/`search` so they get the globe chrome instead of the
-  generic hammer. Same for `file-search`'s tools if their names are stable.
+- ~~`itemTypeForPiTool`/`kindForPiTool`: map pi-config's `search` and
+  `scrape` to `web_search`/`search` so they get the globe chrome instead of
+  the generic hammer.~~ Done, including `fd`/`rg` as `search` kinds.
 - Pi tool results carry a structured `details` field alongside `content`
   (todos.ts returns `details.todos`; the built-in `edit` returns
   `EditToolDetails` with the computed diff). **Verify** whether
