@@ -91,10 +91,15 @@ import { useOpenPrLink } from "../lib/openPullRequestLink";
 import { readLocalApi } from "../localApi";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import {
+  buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
-import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import {
+  legacyProjectCwdPreferenceKey,
+  resolveProjectExpanded,
+  useUiStateStore,
+} from "../uiStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -125,6 +130,7 @@ import {
   formatWorkingDurationLabel,
   firstValidTimestampMs,
   hasUnseenCompletion,
+  isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
   orderItemsByPreferredIds,
@@ -193,6 +199,14 @@ const SETTLED_TAIL_PAGE_COUNT = 25;
 // Keep the v2 key so existing preferences survive the v2-to-default rename.
 const SETTLED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:settled-expanded";
 const SNOOZED_SHELF_EXPANDED_KEY = "t3code:sidebar-v2:snoozed-expanded";
+
+function projectExpansionPreferenceKeys(project: SidebarProjectSnapshot): string[] {
+  return [
+    project.projectKey,
+    ...project.memberProjects.map((member) => member.physicalProjectKey),
+    ...project.memberProjects.map((member) => legacyProjectCwdPreferenceKey(member.workspaceRoot)),
+  ];
+}
 
 function compactSidebarTimeLabel(label: string): string {
   if (label === "just now") return "now";
@@ -1697,6 +1711,8 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 export default function Sidebar() {
   const projects = useProjects();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
+  const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
+  const setProjectExpanded = useUiStateStore((store) => store.setProjectExpanded);
   const threads = useThreadShells();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
@@ -1779,6 +1795,68 @@ export default function Sidebar() {
   });
   const [projectScopeMenuOpen, setProjectScopeMenuOpen] = useState(false);
   const newThreadContext = useHandleNewThread();
+  const suppressProjectClickForContextMenuRef = useRef(false);
+  const handleProjectContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>, project: SidebarProjectSnapshot) => {
+      event.preventDefault();
+      event.stopPropagation();
+      suppressProjectClickForContextMenuRef.current = true;
+      const position = { x: event.clientX, y: event.clientY };
+      void (async () => {
+        const api = readLocalApi();
+        if (!api) return;
+        const clicked = await settlePromise(() =>
+          api.contextMenu.show([{ id: "new-thread", label: "New thread" }], position),
+        );
+        if (clicked._tag === "Failure" || clicked.value !== "new-thread") return;
+
+        const contextualThread =
+          newThreadContext.activeThread ?? newThreadContext.activeDraftThread ?? null;
+        const contextualProjectRef = contextualThread
+          ? scopeProjectRef(contextualThread.environmentId, contextualThread.projectId)
+          : null;
+        const targetsContextualProject =
+          contextualProjectRef !== null &&
+          project.memberProjectRefs.some(
+            (projectRef) =>
+              projectRef.environmentId === contextualProjectRef.environmentId &&
+              projectRef.projectId === contextualProjectRef.projectId,
+          );
+        const target = targetsContextualProject
+          ? null
+          : buildSidebarProjectPickerEntries({
+              groups: [project],
+              preferredProjectRef: contextualProjectRef,
+            })[0]?.targetProject;
+        if (!targetsContextualProject && !target) return;
+        const createResult = await settlePromise(async () => {
+          if (targetsContextualProject) {
+            await startNewThreadFromContext({
+              activeDraftThread: newThreadContext.activeDraftThread,
+              activeThread: newThreadContext.activeThread ?? undefined,
+              defaultProjectRef: newThreadContext.defaultProjectRef,
+              handleNewThread: newThreadContext.handleNewThread,
+            });
+            return;
+          }
+          await newThreadContext.handleNewThread(
+            scopeProjectRef(target!.environmentId, target!.id),
+          );
+        });
+        if (createResult._tag === "Failure") {
+          const error = squashAtomCommandFailure(createResult);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not create thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
+      })();
+    },
+    [newThreadContext],
+  );
   const openAddProjectCommandPalette = useCallback(
     () => openCommandPalette({ open: "add-project" }),
     [],
@@ -2216,9 +2294,51 @@ export default function Sidebar() {
     return routeThread === undefined ? [] : [routeThread];
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
+  // Active work is grouped into persisted, collapsible project sections.
+  // Pinned work and lifecycle shelves stay global because those states are
+  // stronger than project categorization: pins remain immediately reachable,
+  // and Snoozed/Settled keep their single predictable parking locations.
+  const activeProjectSections = useMemo(
+    () =>
+      projectGroups
+        .filter(
+          (project) =>
+            scopedProjectGroup === null || project.projectKey === scopedProjectGroup.projectKey,
+        )
+        .map((project) => {
+          const memberKeys = new Set(
+            project.memberProjectRefs.map(
+              (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
+            ),
+          );
+          const projectThreads = activeThreads.filter((thread) =>
+            memberKeys.has(`${thread.environmentId}:${thread.projectId}`),
+          );
+          const preferenceKeys = projectExpansionPreferenceKeys(project);
+          // A scoped list already names the project in the filter control and
+          // omits this heading, so it must not inherit the All-projects
+          // collapsed state (there would be no control here to expand it).
+          const expanded =
+            scopedProjectGroup !== null ||
+            resolveProjectExpanded(projectExpandedById, preferenceKeys);
+          const visibleThreads = expanded ? projectThreads : [];
+          return { project, preferenceKeys, expanded, threads: projectThreads, visibleThreads };
+        }),
+    [activeThreads, projectExpandedById, projectGroups, scopedProjectGroup],
+  );
+  const visibleActiveThreads = useMemo(
+    () => activeProjectSections.flatMap((section) => section.visibleThreads),
+    [activeProjectSections],
+  );
+
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () => [
+      ...pinnedThreads,
+      ...visibleActiveThreads,
+      ...visibleSnoozedThreads,
+      ...renderedSettledThreads,
+    ],
+    [pinnedThreads, renderedSettledThreads, visibleActiveThreads, visibleSnoozedThreads],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3783,8 +3903,77 @@ export default function Sidebar() {
                       />,
                     );
                   }
-                  for (const thread of activeThreads) {
-                    items.push(renderThreadRow(thread, "active"));
+                  for (const section of activeProjectSections) {
+                    const { expanded, preferenceKeys, project, threads: projectThreads } = section;
+                    if (scopedProjectGroup !== null) {
+                      for (const thread of section.visibleThreads) {
+                        items.push(renderThreadRow(thread, "active"));
+                      }
+                      continue;
+                    }
+                    items.push(
+                      <li
+                        key={`project-section:${project.projectKey}`}
+                        data-thread-selection-safe
+                        className="list-none"
+                      >
+                        <button
+                          type="button"
+                          aria-expanded={expanded}
+                          aria-label={`${expanded ? "Collapse" : "Expand"} ${project.displayName}`}
+                          onPointerDownCapture={(event) => {
+                            suppressProjectClickForContextMenuRef.current = false;
+                            if (
+                              isContextMenuPointerDown({
+                                button: event.button,
+                                ctrlKey: event.ctrlKey,
+                                isMac: isMacPlatform(navigator.platform),
+                              })
+                            ) {
+                              suppressProjectClickForContextMenuRef.current = true;
+                              event.stopPropagation();
+                            }
+                          }}
+                          onClick={() => {
+                            if (suppressProjectClickForContextMenuRef.current) {
+                              suppressProjectClickForContextMenuRef.current = false;
+                              return;
+                            }
+                            clearSelection();
+                            setProjectExpanded(preferenceKeys, !expanded);
+                          }}
+                          onContextMenu={(event) => handleProjectContextMenu(event, project)}
+                          className="mb-0.5 mt-2 flex h-7 w-full cursor-pointer items-center gap-2 rounded-md px-2.5 text-left text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                        >
+                          <ChevronDownIcon
+                            aria-hidden
+                            className={cn(
+                              "size-3 shrink-0 transition-transform",
+                              !expanded && "-rotate-90",
+                            )}
+                          />
+                          <ProjectFavicon
+                            environmentId={project.environmentId}
+                            cwd={project.workspaceRoot}
+                            faviconPath={project.faviconPath}
+                            className="size-4 shrink-0"
+                          />
+                          <span className="min-w-0 flex-1 truncate text-xs font-medium">
+                            {project.displayName}
+                          </span>
+                          <span className="text-[11px] tabular-nums text-sidebar-muted-foreground/65">
+                            {projectThreads.length}
+                          </span>
+                        </button>
+                        {section.visibleThreads.length > 0 ? (
+                          <ul role="list" className="flex flex-col gap-px">
+                            {section.visibleThreads.map((thread) =>
+                              renderThreadRow(thread, "active"),
+                            )}
+                          </ul>
+                        ) : null}
+                      </li>,
+                    );
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
                   // way, never gone. The header always renders while anything

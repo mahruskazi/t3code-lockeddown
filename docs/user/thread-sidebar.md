@@ -1,5 +1,11 @@
 # Organizing threads
 
+Active threads are grouped by project. Select a project heading to collapse or expand its threads;
+the choice is remembered across reloads. Pinned, snoozed, and settled threads stay in their shared
+sections so those states have one predictable place in the sidebar. Right-click a project heading
+and choose **New thread** to start one in that project. When the project filter is set to one
+project, its threads appear directly without a duplicate project heading.
+
 Pin a thread from its context menu to keep it in the pinned section above your active work.
 Pinned threads are shown independently of their project, including when you connect to more than
 one environment.
