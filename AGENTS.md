@@ -4,7 +4,7 @@ T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provid
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
 
-> **This checkout is `t3code-lockeddown`, a hardened fork.** It runs against proprietary company code, so it holds invariants upstream does not. Read [This is a locked-down fork](#this-is-a-locked-down-fork) before merging anything from upstream.
+> **This checkout is `t3code-lockeddown`, a hardened fork.** It runs against proprietary company code, under one rule upstream does not hold: no code and no prompts leave the machine except through an authorized provider harness. Read [This is a locked-down fork](#this-is-a-locked-down-fork) before merging anything from upstream.
 
 ## What makes T3 Code special?
 
@@ -87,13 +87,44 @@ The most common defect in this repo is a change that works on the path you teste
 
 ## This is a locked-down fork
 
-`mahruskazi/t3code-lockeddown` is a fork of `pingdotgg/t3code` that exists for one reason: **it is safe to point at proprietary company code and data.** The agents running inside this app read confidential repositories, credentials sit in the environments it connects to, and everything an agent sees passes through this server. So the app itself must not send that material anywhere, and must not fetch executable code from anywhere we do not control.
+`mahruskazi/t3code-lockeddown` is a fork of `pingdotgg/t3code` that exists for one reason: **it is safe to point at proprietary company code and data.** The agents running inside this app read confidential repositories, credentials sit in the environments it connects to, and everything an agent sees passes through this server.
 
 Upstream is a healthy, fast-moving open source project with a large contributor base and bot-authored commits. That is good for upstream's users and it is exactly why we do not track it blindly: every line we merge gains the same access to that data as the lines we wrote ourselves.
 
+### The rule
+
+**No code and no prompts leave this machine, except through an authorized provider harness.**
+
+The authorized path is the one the product exists for: a provider CLI — Codex, Claude Code, Cursor, Grok, OpenCode, Pi — sending a turn to its own model API under the operator's own subscription. That is a deal the operator already made with that vendor deliberately, and it is the only channel that may carry source code, diffs, file contents, terminal output, or prompt text off this machine.
+
+Everything else is a leak, including the well-meant kind: analytics, crash reporting, "anonymous" usage pings, remote log shipping, a debug endpoint, a prefetch, a provider adapter that quietly widens what it puts in a payload. Intent does not enter into it. A host we did not choose receiving bytes we did not review is the failure, whether it got there by an attacker, a contributor, or a dependency.
+
+Two things follow, and they are why the invariants below exist:
+
+- **Code we did not choose must not run here.** Anything fetched and executed gets the same access to the data as our own code, so a runtime download is an egress path with extra steps.
+- **The rule binds the merged tree, not our commits.** Upstream code ships into the same process with the same access. That is what the audit process below is for.
+
+### Where data legitimately goes
+
+Every outbound path this fork has, and what it may carry. A path that is not on this list is a finding.
+
+| Path | Carries code or prompts | Status |
+| --- | --- | --- |
+| Provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode, Pi) | Yes — this is the authorized harness | The product |
+| Source-control hosts (GitHub, GitLab, Bitbucket, Azure DevOps) | Yes — but to the repo's own remote, under the operator's credentials | Authorized |
+| T3 Connect relay (`app.t3.codes` plus a cloudflared tunnel) | Yes — the entire session | Opt-in per environment via `t3 connect`, never on by default. See the note below. |
+| PostHog analytics | Event metadata | **Removed** — invariant 1 |
+| npm registry, at runtime | No, but pulls executable code onto the machine | **Removed** — invariants 2 and 3 |
+| `cloudflared` binary download | No, but is an executable | Pinned version, sha256-verified, fetched only when the operator turns on T3 Connect (`packages/shared/src/relayClient.ts`) |
+| litellm pricing table (`raw.githubusercontent.com`) | No — a rates JSON, cached for a day | Read-only fetch (`apps/server/src/usage/UsageService.ts`) |
+| Open VSX theme search (`open-vsx.org`) | No — a theme query from the web client | Read-only fetch (`apps/web/src/openVsxThemes.ts`) |
+| Hosted app auth (`app.t3.codes`, Clerk) | No — account identity | Only on the hosted-web and relay paths |
+
+**T3 Connect is the open one.** This fork has not disabled it, and it is the one available path that would carry everything — code, prompts, diffs, terminal output — through a third party. It takes a deliberate `t3 connect` to start, so nothing leaks by accident, but enabling it on a machine holding proprietary code is an authorization decision, not a convenience. Local network and Tailscale reach the same clients without it. If we ever decide the relay is out of bounds here, that becomes a fourth invariant with a choke point and a tripwire, like the three below.
+
 ### The invariants
 
-These are invariants, not preferences. Restoring any of them is a regression no matter how the change arrives — an upstream merge, a dependency bump, a "harmless" revert. Every touch point carries a `[fork:lockdown]` marker:
+The rule above is enforced in review. These three leak paths are closed in code instead, so they cannot come back quietly. They are invariants, not preferences. Restoring any of them is a regression no matter how the change arrives — an upstream merge, a dependency bump, a "harmless" revert. Every touch point carries a `[fork:lockdown]` marker:
 
 ```
 git grep -n "fork:lockdown"   # every lockdown touch point, at any time
@@ -120,10 +151,10 @@ git diff <last-sync>..upstream/main
 Read the whole diff at least at file-name level, then look hard at:
 
 - **New or bumped dependencies.** `package.json` and `pnpm-lock.yaml` additions are the highest-risk item in any sync — a new transitive package is code we never read, running with our access. Justify every addition, and check `postinstall`/`prepare` scripts on anything new.
-- **New outbound network calls.** Grep the diff for `fetch(`, `http://`, `https://`, new hostnames, analytics or error-reporting SDKs. A crash reporter is telemetry wearing a different hat.
+- **New outbound network calls.** Grep the diff for `fetch(`, `http://`, `https://`, new hostnames, analytics or error-reporting SDKs. Any new destination has to earn a row in the table above or it does not merge. A crash reporter is telemetry wearing a different hat.
 - **The invariant files themselves.** Anything under `apps/server/src/telemetry/`, `apps/server/src/cloud/`, or `packages/ssh/`. Conflicts here are expected and always resolve toward the fork.
 - **Anything that reads outside the workspace.** Environment variables, `~/.t3` state, secrets, SSH config, git credentials — especially where the value then flows into a request body, a log line, or a provider prompt.
-- **Provider adapters.** A new endpoint or a widened prompt payload changes where our source code gets sent.
+- **Provider adapters.** A new endpoint or a widened prompt payload changes where our source code gets sent. The harness is authorized; an adapter sending more than the turn to somewhere else is not.
 - **CI and build config.** `.github/workflows`, build scripts, and Electron entitlements can exfiltrate or weaken the shipped app without touching product code.
 - **Auth, pairing, and permission paths.** Anything that widens who can connect, or what a connected client may do, is a data-access change.
 
