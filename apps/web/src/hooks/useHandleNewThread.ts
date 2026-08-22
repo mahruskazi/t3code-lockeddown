@@ -36,6 +36,7 @@ interface NewThreadWorkspaceOptions {
   worktreePath?: string | null;
   envMode?: DraftThreadEnvMode;
   startFromOrigin?: boolean;
+  inheritThreadSettings?: boolean;
 }
 
 // The workspace options the caller passed explicitly, shaped for the draft
@@ -73,6 +74,7 @@ export function useNewThreadHandler() {
         worktreePath?: string | null;
         envMode?: DraftThreadEnvMode;
         startFromOrigin?: boolean;
+        inheritThreadSettings?: boolean;
         replace?: boolean;
         /**
          * Move the viewed draft's typed content (prompt + images) into the
@@ -99,26 +101,29 @@ export function useNewThreadHandler() {
         setModelSelection,
       } = useComposerDraftStore.getState();
       const currentRouteTarget = getCurrentRouteTarget();
-      // A new thread carries the user's *working mode* from the thread being
-      // viewed: model (including options like reasoning effort and context
-      // window), permission mode, and interaction mode. Branch, worktree, and
-      // env mode never carry implicitly — those come from the configured
-      // defaults unless the caller passes them explicitly.
+      // The duplicate-context shortcut opts into carrying the viewed thread's
+      // working mode: model (including reasoning effort and context window),
+      // permission mode, and interaction mode. Ordinary new-thread surfaces
+      // leave this off and use their configured/sticky defaults.
+      const shouldInheritThreadSettings = options?.inheritThreadSettings === true;
       const carrySourceShell =
-        currentRouteTarget?.kind === "server"
+        shouldInheritThreadSettings && currentRouteTarget?.kind === "server"
           ? readThreadShell(currentRouteTarget.threadRef)
           : null;
       const carrySourceDraft =
-        currentRouteTarget?.kind === "draft" ? getDraftSession(currentRouteTarget.draftId) : null;
+        shouldInheritThreadSettings && currentRouteTarget?.kind === "draft"
+          ? getDraftSession(currentRouteTarget.draftId)
+          : null;
       // Composer overrides win over the persisted thread state — they are
       // what the user currently sees in the composer controls.
-      const carrySourceComposer = currentRouteTarget
-        ? getComposerDraft(
-            currentRouteTarget.kind === "server"
-              ? currentRouteTarget.threadRef
-              : currentRouteTarget.draftId,
-          )
-        : null;
+      const carrySourceComposer =
+        shouldInheritThreadSettings && currentRouteTarget
+          ? getComposerDraft(
+              currentRouteTarget.kind === "server"
+                ? currentRouteTarget.threadRef
+                : currentRouteTarget.draftId,
+            )
+          : null;
       const composerActiveProvider = carrySourceComposer?.activeProvider ?? null;
       const composerModelSelection = composerActiveProvider
         ? (carrySourceComposer?.modelSelectionByProvider[composerActiveProvider] ?? null)

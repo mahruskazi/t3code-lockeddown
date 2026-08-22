@@ -1072,16 +1072,24 @@ function OpenCommandPaletteDialog(props: {
                   projectRef.environmentId === contextualProjectRef.environmentId &&
                   projectRef.projectId === contextualProjectRef.projectId,
               );
-            await handleNewThread(
-              contextualRefBelongsToGroup
-                ? contextualProjectRef
-                : scopeProjectRef(project.environmentId, project.id),
-            );
+            if (contextualRefBelongsToGroup) {
+              await startNewThreadFromContext({
+                activeDraftThread,
+                activeThread: activeThread ?? undefined,
+                defaultProjectRef,
+                handleNewThread,
+              });
+              return;
+            }
+            await handleNewThread(scopeProjectRef(project.environmentId, project.id));
           },
         }),
       ),
     [
+      activeDraftThread,
+      activeThread,
       contextualProjectRef,
+      defaultProjectRef,
       handleNewThread,
       pickerProjects,
       projectEnvironmentLocationById,

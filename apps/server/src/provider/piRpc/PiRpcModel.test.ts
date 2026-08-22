@@ -13,6 +13,7 @@ import {
   itemTypeForPiTool,
   kindForPiTool,
   parsePiAgentEnd,
+  parsePiAvailableSkills,
   parsePiAvailableModels,
   parsePiExtensionNotification,
   parsePiExtensionUiRequest,
@@ -32,6 +33,7 @@ import {
   T3_PI_USER_INPUT_RESPONSE_PREFIX,
   T3_PI_USER_INPUT_TITLE_PREFIX,
   usageSnapshotFromPiUsage,
+  usageSnapshotFromPiSessionStats,
 } from "./PiRpcModel.ts";
 import { T3_PI_EXTENSION_SOURCE } from "./PiExtensionSource.ts";
 
@@ -112,6 +114,48 @@ describe("model slugs", () => {
 
     assert.deepStrictEqual(parsePiAvailableModels("nope"), []);
   });
+
+  it("parses loaded skills from current and legacy command metadata", () => {
+    assert.deepStrictEqual(
+      parsePiAvailableSkills({
+        commands: [
+          {
+            name: "skill:browser",
+            description: "Drive a browser",
+            source: "skill",
+            sourceInfo: {
+              path: "/home/test/.pi/agent/skills/browser/SKILL.md",
+              scope: "user",
+              source: "skills/browser",
+              origin: "top-level",
+            },
+          },
+          {
+            name: "skill:deploy",
+            source: "skill",
+            path: "/workspace/.pi/skills/deploy/SKILL.md",
+            location: "project",
+          },
+          { name: "fix-tests", source: "prompt", path: "/tmp/fix-tests.md" },
+        ],
+      }),
+      [
+        {
+          name: "browser",
+          description: "Drive a browser",
+          path: "/home/test/.pi/agent/skills/browser/SKILL.md",
+          scope: "user",
+          enabled: true,
+        },
+        {
+          name: "deploy",
+          path: "/workspace/.pi/skills/deploy/SKILL.md",
+          scope: "project",
+          enabled: true,
+        },
+      ],
+    );
+  });
 });
 
 describe("session state and resume", () => {
@@ -121,15 +165,18 @@ describe("session state and resume", () => {
       sessionId: "abc123",
       sessionFile: "/tmp/session.jsonl",
       isStreaming: true,
+      autoCompactionEnabled: true,
     });
     assert.equal(state.sessionId, "abc123");
     assert.equal(state.sessionFile, "/tmp/session.jsonl");
     assert.equal(state.modelSlug, "anthropic/claude-sonnet-5");
     assert.isTrue(state.isStreaming);
+    assert.isTrue(state.autoCompactionEnabled);
 
     const empty = parsePiSessionState(undefined);
     assert.isUndefined(empty.sessionId);
     assert.isFalse(empty.isStreaming);
+    assert.isFalse(empty.autoCompactionEnabled);
   });
 
   it("round-trips resume cursors and rejects foreign shapes", () => {
@@ -186,6 +233,40 @@ describe("assistant deltas and usage", () => {
     });
     assert.isUndefined(usageSnapshotFromPiUsage({}));
     assert.isUndefined(usageSnapshotFromPiUsage("nope"));
+  });
+
+  it("maps session stats onto active and cumulative context usage", () => {
+    assert.deepStrictEqual(
+      usageSnapshotFromPiSessionStats(
+        {
+          tokens: { input: 50_000, output: 10_000, cacheRead: 40_000, total: 105_000 },
+          contextUsage: { tokens: 60_000, contextWindow: 200_000, percent: 30 },
+        },
+        {
+          usedTokens: 1_075,
+          inputTokens: 1_000,
+          cachedInputTokens: 700,
+          outputTokens: 75,
+        },
+        true,
+      ),
+      {
+        usedTokens: 60_000,
+        totalProcessedTokens: 105_000,
+        maxTokens: 200_000,
+        inputTokens: 1_000,
+        cachedInputTokens: 700,
+        outputTokens: 75,
+        lastUsedTokens: 1_075,
+        lastInputTokens: 1_000,
+        lastCachedInputTokens: 700,
+        lastOutputTokens: 75,
+        compactsAutomatically: true,
+      },
+    );
+    assert.isUndefined(
+      usageSnapshotFromPiSessionStats({ contextUsage: { tokens: null, contextWindow: 200_000 } }),
+    );
   });
 });
 

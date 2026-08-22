@@ -323,6 +323,22 @@ function handleCommand(command: Record<string, unknown>) {
         },
       });
       return;
+    case "get_session_stats":
+      respond(id, "get_session_stats", {
+        data: {
+          sessionFile: state.sessionFile,
+          sessionId: state.sessionId,
+          userMessages: 1,
+          assistantMessages: 1,
+          toolCalls: 0,
+          toolResults: 0,
+          totalMessages: 2,
+          tokens: { input: 120, output: 18, cacheRead: 40, cacheWrite: 0, total: 178 },
+          cost: 0,
+          contextUsage: { tokens: 178, contextWindow: 1_000, percent: 17.8 },
+        },
+      });
+      return;
     case "set_model": {
       const provider = typeof command.provider === "string" ? command.provider : "";
       const modelId = typeof command.modelId === "string" ? command.modelId : "";
