@@ -10,7 +10,8 @@ import * as ProcessRunner from "../processRunner.ts";
 /**
  * A pinned runtime is an exact `t3@<version>` laid out under
  * <baseDir>/runtime/versions/<version>. The boot service points its systemd
- * unit here, and server self-update switches over to the target version here.
+ * unit or launch agent here, and server self-update switches over to the
+ * target version here.
  *
  * [fork:lockdown] Upstream downloads missing pinned runtimes from the npm
  * registry. This fork never does — a complete runtime already on disk is
