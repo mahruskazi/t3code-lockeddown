@@ -73,10 +73,13 @@ import {
   PI_PROCESS_EXITED_EVENT,
   PI_RESUME_VERSION,
   parsePiAgentEnd,
+  parsePiExtensionNotification,
   parsePiExtensionUiRequest,
   parsePiResumeCursor,
   parsePiSessionState,
   parsePiToolExecution,
+  PI_TODO_WRITE_TOOL_NAME,
+  planFromPiTodoWriteArgs,
   parseT3PiApprovalTitle,
   parseT3PiSubagentEvent,
   parseT3PiUserInputTitle,
@@ -103,6 +106,9 @@ const GET_SESSION_STATS_TIMEOUT = Duration.seconds(2);
 const PROMPT_REQUEST_TIMEOUT = Duration.hours(24);
 const PI_SUBAGENT_PROGRESS_MIN_INTERVAL_MS = 1_000;
 const PI_SUBAGENT_MAX_TASKS_PER_SESSION = 256;
+/** Extension notifications: displayed length and a per-session flood cap. */
+const PI_NOTIFICATION_MAX_CHARS = 500;
+const PI_NOTIFICATION_MAX_PER_SESSION = 100;
 
 export interface PiAdapterLiveOptions {
   readonly environment?: NodeJS.ProcessEnv;
@@ -180,6 +186,9 @@ interface PiSessionContext {
   readonly toolArgsByCallId: Map<string, Record<string, unknown>>;
   /** Versioned extension lifecycle state, independent of the parent turn. */
   readonly subagentTasks: Map<RuntimeTaskId, PiSubagentTaskState>;
+  /** Extension notify flood control: total emitted + last message dedupe key. */
+  notificationCount: number;
+  lastNotificationKey: string | undefined;
   assistantItemSeq: number;
   lastUsage: ThreadTokenUsageSnapshot | undefined;
   readonly compactsAutomatically: boolean;
@@ -741,6 +750,39 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               yield* handleT3PiSubagentEvent(ctx, subagentEvent);
               return;
             }
+            const notification = parsePiExtensionNotification(event);
+            if (notification) {
+              // Fire-and-forget: warning/error notifications become work-log
+              // rows so extension failures (typecheck, background jobs, MCP)
+              // are diagnosable from T3. Info-level stays TUI-only noise.
+              if (notification.severity === "info") return;
+              const message = notification.message.slice(0, PI_NOTIFICATION_MAX_CHARS).trim();
+              const dedupeKey = `${notification.severity}:${message}`;
+              if (
+                message.length === 0 ||
+                dedupeKey === ctx.lastNotificationKey ||
+                ctx.notificationCount >= PI_NOTIFICATION_MAX_PER_SESSION
+              ) {
+                return;
+              }
+              ctx.lastNotificationKey = dedupeKey;
+              ctx.notificationCount += 1;
+              yield* logNative(ctx.threadId, "extension_notify", event);
+              yield* offerRuntimeEvent({
+                type: "runtime.warning",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: ctx.threadId,
+                ...(ctx.activeTurnId ? { turnId: ctx.activeTurnId } : {}),
+                payload: { message },
+                raw: {
+                  source: "pi.rpc.extension",
+                  method: "extension_ui_request",
+                  payload: event,
+                },
+              });
+              return;
+            }
             const ui = parsePiExtensionUiRequest(event);
             if (!ui) return;
             yield* logNative(ctx.threadId, "extension_ui_request", event);
@@ -929,6 +971,26 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                   : undefined,
               },
             });
+            // The todo_write checklist doubles as the turn plan (same as
+            // ClaudeAdapter's TodoWrite mapping): the tool row stays, and the
+            // full list additionally feeds the plan chip and the "step N/M"
+            // working indicator. Args only arrive on start.
+            if (
+              event.type === "tool_execution_start" &&
+              tool.toolName === PI_TODO_WRITE_TOOL_NAME
+            ) {
+              const plan = planFromPiTodoWriteArgs(args);
+              if (plan) {
+                yield* offerRuntimeEvent({
+                  type: "turn.plan.updated",
+                  ...(yield* makeEventStamp()),
+                  provider: PROVIDER,
+                  threadId: ctx.threadId,
+                  turnId,
+                  payload: { plan },
+                });
+              }
+            }
             return;
           }
           case "message_end": {
@@ -1130,6 +1192,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             activeContentItems: new Map(),
             toolArgsByCallId: new Map(),
             subagentTasks: new Map(),
+            notificationCount: 0,
+            lastNotificationKey: undefined,
             assistantItemSeq: 0,
             lastUsage: undefined,
             compactsAutomatically: state.autoCompactionEnabled,
