@@ -113,6 +113,7 @@ Every outbound path this fork has, and what it may carry. A path that is not on 
 | Provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode, Pi) | Yes — this is the authorized harness | The product |
 | Source-control hosts (GitHub, GitLab, Bitbucket, Azure DevOps) | Yes — but to the repo's own remote, under the operator's credentials | Authorized |
 | T3 Connect relay (`app.t3.codes` plus a cloudflared tunnel) | Yes — the entire session | Opt-in per environment via `t3 connect`, never on by default. See the note below. |
+| `t3 triage` diagnostic issue (public issue on `pingdotgg/t3code`) | Yes — logs, DB contents, terminal output | **Removed** — invariant 4 |
 | PostHog analytics | Event metadata | **Removed** — invariant 1 |
 | npm registry, at runtime | No, but pulls executable code onto the machine | **Removed** — invariants 2 and 3 |
 | `cloudflared` binary download | No, but is an executable | Pinned version, sha256-verified, fetched only when the operator turns on T3 Connect (`packages/shared/src/relayClient.ts`) |
@@ -124,7 +125,7 @@ Every outbound path this fork has, and what it may carry. A path that is not on 
 
 ### The invariants
 
-The rule above is enforced in review. These three leak paths are closed in code instead, so they cannot come back quietly. They are invariants, not preferences. Restoring any of them is a regression no matter how the change arrives — an upstream merge, a dependency bump, a "harmless" revert. Every touch point carries a `[fork:lockdown]` marker:
+The rule above is enforced in review. These four leak paths are closed in code instead, so they cannot come back quietly. They are invariants, not preferences. Restoring any of them is a regression no matter how the change arrives — an upstream merge, a dependency bump, a "harmless" revert. Every touch point carries a `[fork:lockdown]` marker:
 
 ```
 git grep -n "fork:lockdown"   # every lockdown touch point, at any time
@@ -133,6 +134,7 @@ git grep -n "fork:lockdown"   # every lockdown touch point, at any time
 1. **No telemetry leaves the machine.** `apps/server/src/telemetry/AnalyticsService.ts` binds the live layer to the no-op service, so the PostHog client is never constructed, no flush fiber runs, no identity file is read, and no environment variable can turn sending back on. Tripwire: `AnalyticsService.test.ts` enables telemetry in config and asserts zero outbound requests.
 2. **No executable code arrives from the npm registry at runtime.** `apps/server/src/cloud/pinnedRuntime.ts` is the single choke point covering both server self-update and boot-service installs. Upstream downloads `t3@<version>` on demand; this fork reuses a complete runtime already on disk and hard-errors otherwise, so an update can only ever run a build we provisioned. Tripwires: `pinnedRuntime.test.ts` (a process runner that dies on any spawn) and `selfUpdate.test.ts`.
 3. **Remote hosts run our build, never a published package.** Upstream's SSH launcher falls back to `npx t3@<version>` when no `t3` is on the remote PATH. This fork removes that fallback entirely (`REMOTE_RUNNER_SCRIPT` in `packages/ssh/src/tunnel.ts`) and fails with provisioning instructions instead. Tripwire: `tunnel.test.ts` asserts the generated script contains no npm or npx exec path. See below for how provisioning works.
+4. **Diagnostic bundles never leave the machine.** Upstream ships `t3 triage` (`apps/server/src/cli/triage.ts`), which seeds a local coding agent to investigate the state database, provider event log, and terminal logs, then file the findings as a public issue on `pingdotgg/t3code`. Here that evidence *is* the proprietary material, and upstream's redaction step covers credentials and home paths but not source, prompt text, or repo identities. This fork does not register the command and does not carry its playbook or issue template. Tripwire: `bin.test.ts` asserts `triage` is absent from the CLI.
 
 The Pi provider is a separate fork concern with its own marker and document: `git grep -n "fork:pi"` and `docs/internals/fork-pi-provider.md`.
 
@@ -152,7 +154,7 @@ Read the whole diff at least at file-name level, then look hard at:
 
 - **New or bumped dependencies.** `package.json` and `pnpm-lock.yaml` additions are the highest-risk item in any sync — a new transitive package is code we never read, running with our access. Justify every addition, and check `postinstall`/`prepare` scripts on anything new.
 - **New outbound network calls.** Grep the diff for `fetch(`, `http://`, `https://`, new hostnames, analytics or error-reporting SDKs. Any new destination has to earn a row in the table above or it does not merge. A crash reporter is telemetry wearing a different hat.
-- **The invariant files themselves.** Anything under `apps/server/src/telemetry/`, `apps/server/src/cloud/`, or `packages/ssh/`. Conflicts here are expected and always resolve toward the fork.
+- **The invariant files themselves.** Anything under `apps/server/src/telemetry/`, `apps/server/src/cloud/`, or `packages/ssh/`, plus the CLI registration in `apps/server/src/bin.ts`. Conflicts here are expected and always resolve toward the fork.
 - **Anything that reads outside the workspace.** Environment variables, `~/.t3` state, secrets, SSH config, git credentials — especially where the value then flows into a request body, a log line, or a provider prompt.
 - **Provider adapters.** A new endpoint or a widened prompt payload changes where our source code gets sent. The harness is authorized; an adapter sending more than the turn to somewhere else is not.
 - **CI and build config.** `.github/workflows`, build scripts, and Electron entitlements can exfiltrate or weaken the shipped app without touching product code.
@@ -160,7 +162,7 @@ Read the whole diff at least at file-name level, then look hard at:
 
 Then, before pushing the merge:
 
-- Run the tripwires: the telemetry, pinned-runtime, self-update, and tunnel tests above. They are the automated half of this audit and they must pass on the merged tree, not just on the fork's side.
+- Run the tripwires: the telemetry, pinned-runtime, self-update, tunnel, and CLI-registration tests above. They are the automated half of this audit and they must pass on the merged tree, not just on the fork's side.
 - Confirm `git grep -n "fork:lockdown"` still finds every marker — a vanished marker means an upstream hunk overwrote a lockdown edit.
 - If something in the diff is unclear, it does not merge until it is understood. "Probably fine" is not an audit result.
 
