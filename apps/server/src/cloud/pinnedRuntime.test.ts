@@ -11,7 +11,7 @@ import {
   PinnedRuntimeInstallError,
 } from "./pinnedRuntime.ts";
 
-// Locked-down fork tripwire: pinned runtimes must never be downloaded from
+// [fork:lockdown] Tripwire: pinned runtimes must never be downloaded from
 // the npm registry. A runner that dies on any invocation proves no process
 // (npm or otherwise) is spawned by the install path.
 const forbiddenRunner = ProcessRunner.ProcessRunner.of({

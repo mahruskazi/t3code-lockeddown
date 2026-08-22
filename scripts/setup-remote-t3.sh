@@ -3,9 +3,9 @@
 # there, and install a `t3` shim on the remote PATH so the desktop app's
 # SSH launcher runs this fork instead of installing `t3` from npm.
 #
-# The SSH launcher's remote runner prefers an existing `t3` executable on
-# PATH before falling back to npm/npx, so once the shim exists the npm
-# fallback is never reached.
+# [fork:lockdown] The SSH launcher's remote runner only ever execs a `t3`
+# already on PATH; this fork removed the npm/npx fallback entirely, so an
+# unprovisioned host fails loudly instead of pulling upstream's package.
 #
 # Usage:
 #   scripts/setup-remote-t3.sh <ssh-host> [remote-dir]

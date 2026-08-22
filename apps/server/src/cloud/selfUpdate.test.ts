@@ -21,9 +21,9 @@ interface HarnessOptions {
   readonly preflight?: "ready" | "blocked";
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   /**
-   * Pre-provision the pinned runtime on disk. This fork never downloads
-   * runtimes from npm, so an update can only proceed against a runtime that
-   * is already there.
+   * Pre-provision the pinned runtime on disk. [fork:lockdown] This fork
+   * never downloads runtimes from npm, so an update can only proceed against
+   * a runtime that is already there.
    */
   readonly seedRuntime?: boolean;
 }
@@ -116,7 +116,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         method: "boot-service",
         updateId: "launcher-id",
       });
-      // Locked-down fork: "install" must never appear here. The fake runner
+      // [fork:lockdown] "install" must never appear here. The fake runner
       // records it if the npm install path is ever restored.
       expect(order).toEqual(["preflight", "accept"]);
     }),

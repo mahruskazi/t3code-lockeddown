@@ -35,7 +35,7 @@ interface RecordedBatchBody {
   }>;
 }
 
-// Locked-down fork tripwire: telemetry must never be sent, even when the
+// [fork:lockdown] Tripwire: telemetry must never be sent, even when the
 // environment explicitly enables it. If an upstream merge restores the live
 // PostHog layer, this test fails.
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {

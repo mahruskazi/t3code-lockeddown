@@ -12,7 +12,7 @@ import * as ProcessRunner from "../processRunner.ts";
  * <baseDir>/runtime/versions/<version>. The boot service points its systemd
  * unit here, and server self-update switches over to the target version here.
  *
- * Locked-down fork: upstream downloads missing pinned runtimes from the npm
+ * [fork:lockdown] Upstream downloads missing pinned runtimes from the npm
  * registry. This fork never does — a complete runtime already on disk is
  * reused, and a missing or incomplete one is a hard error telling the
  * operator to provision from a source checkout. This is the single choke
@@ -74,8 +74,8 @@ export class PinnedRuntimePreflightBlockedError extends Schema.TaggedErrorClass<
 
 /**
  * Returns the paths of a complete pinned runtime already on disk (sentinel
- * plus entry file), after validating it. Fails when the runtime is missing
- * or incomplete: this fork never downloads t3 from the npm registry.
+ * plus entry file), after validating it. Fails when the runtime is missing or
+ * incomplete, because [fork:lockdown] this fork never downloads t3 from npm.
  */
 interface PinnedRuntimeInstallInput {
   readonly baseDir: string;
