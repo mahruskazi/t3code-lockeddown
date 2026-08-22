@@ -43,6 +43,15 @@ const connectUnavailableCommand = Command.make("connect", {
   ),
 );
 
+/**
+ * [fork:lockdown] Upstream registers a `triage` command that seeds a local
+ * coding agent to read the state database, provider event log, and terminal
+ * logs, then file a public issue on pingdotgg/t3code. On a machine holding
+ * proprietary code that evidence is the confidential material, and upstream's
+ * redaction step covers credentials and home paths but not source, prompts, or
+ * repo identities. This fork does not register it. Tripwire: bin.test.ts
+ * asserts `triage` is absent from the CLI.
+ */
 export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
   Command.make("t3", { ...sharedServerCommandFlags }).pipe(
     Command.withDescription("Run the T3 Code server."),

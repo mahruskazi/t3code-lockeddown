@@ -203,6 +203,23 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
     }).pipe(Effect.provide(Layer.mergeAll(CliRuntimeLayer, TestConsole.layer))),
   );
 
+  // [fork:lockdown] Tripwire: `t3 triage` seeds a coding agent to mine the state
+  // database, provider event log, and terminal logs for evidence and file it in a
+  // public upstream issue. This fork does not ship it; an upstream merge that
+  // restores the registration fails here.
+  it.effect("does not register the upstream triage command", () =>
+    Effect.gen(function* () {
+      const withConnect = yield* captureStdout(runCli(["--help"], connectCli));
+      const withoutConnect = yield* captureStdout(runCli(["--help"], noConnectCli));
+
+      // The sibling commands prove the subcommand list is what is being read.
+      assert.include(withConnect.output, "service");
+      assert.include(withConnect.output, "project");
+      assert.notInclude(withConnect.output, "triage");
+      assert.notInclude(withoutConnect.output, "triage");
+    }),
+  );
+
   it.effect("exposes service lifecycle commands without T3 Connect configuration", () =>
     Effect.gen(function* () {
       const { output } = yield* captureStdout(runCli(["service", "--help"], noConnectCli));

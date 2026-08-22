@@ -65,6 +65,10 @@ project, it opens the project chooser first. `chat.newLocal` (⌘⇧N by default
 the current thread context into a new thread in the same project. It inherits model, reasoning,
 permission and interaction modes, plus the current branch and checkout or worktree.
 
+Background submission from a new thread is the exception. `mod+enter` starts that thread and opens
+another new thread with the same workspace mode and base branch. **New worktree** remains selected,
+but the new thread does not reuse the worktree created for the thread that just started.
+
 ## `when` Conditions
 
 A `when` expression is evaluated against context keys describing the current UI state. The keys
