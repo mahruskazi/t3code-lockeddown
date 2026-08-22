@@ -4,6 +4,8 @@ T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provid
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
 
+> **This checkout is `t3code-lockeddown`, a hardened fork.** It runs against proprietary company code, so it holds invariants upstream does not. Read [This is a locked-down fork](#this-is-a-locked-down-fork) before merging anything from upstream.
+
 ## What makes T3 Code special?
 
 We have over 100,000 users who love T3 Code. It's important we maintain the things they love as we continue to iterate on the product. Here's a brief list of the things we can never compromise on.
@@ -83,13 +85,61 @@ The most common defect in this repo is a change that works on the path you teste
 - The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to. If the token got consumed, mint a fresh one with `node apps/server/src/bin.ts pair` — note it carries standard scopes, while the startup URL carries admin scopes (needed for Settings → Connections management).
 - Stop what you started, by the PID you tracked. See rule 1.
 
-## Remote environments (Coder / SSH)
+## This is a locked-down fork
 
-This fork is deployed to remote SSH hosts (e.g. Coder workspaces) from the local checkout, never from the published npm package. Upstream's SSH launcher falls back to `npx t3@<version>` when no `t3` is on the remote PATH; this fork removes that fallback entirely (`REMOTE_RUNNER_SCRIPT` in `packages/ssh/src/tunnel.ts`) and fails with instructions instead. Provisioning works like this:
+`mahruskazi/t3code-lockeddown` is a fork of `pingdotgg/t3code` that exists for one reason: **it is safe to point at proprietary company code and data.** The agents running inside this app read confidential repositories, credentials sit in the environments it connects to, and everything an agent sees passes through this server. So the app itself must not send that material anywhere, and must not fetch executable code from anywhere we do not control.
+
+Upstream is a healthy, fast-moving open source project with a large contributor base and bot-authored commits. That is good for upstream's users and it is exactly why we do not track it blindly: every line we merge gains the same access to that data as the lines we wrote ourselves.
+
+### The invariants
+
+These are invariants, not preferences. Restoring any of them is a regression no matter how the change arrives — an upstream merge, a dependency bump, a "harmless" revert. Every touch point carries a `[fork:lockdown]` marker:
+
+```
+git grep -n "fork:lockdown"   # every lockdown touch point, at any time
+```
+
+1. **No telemetry leaves the machine.** `apps/server/src/telemetry/AnalyticsService.ts` binds the live layer to the no-op service, so the PostHog client is never constructed, no flush fiber runs, no identity file is read, and no environment variable can turn sending back on. Tripwire: `AnalyticsService.test.ts` enables telemetry in config and asserts zero outbound requests.
+2. **No executable code arrives from the npm registry at runtime.** `apps/server/src/cloud/pinnedRuntime.ts` is the single choke point covering both server self-update and boot-service installs. Upstream downloads `t3@<version>` on demand; this fork reuses a complete runtime already on disk and hard-errors otherwise, so an update can only ever run a build we provisioned. Tripwires: `pinnedRuntime.test.ts` (a process runner that dies on any spawn) and `selfUpdate.test.ts`.
+3. **Remote hosts run our build, never a published package.** Upstream's SSH launcher falls back to `npx t3@<version>` when no `t3` is on the remote PATH. This fork removes that fallback entirely (`REMOTE_RUNNER_SCRIPT` in `packages/ssh/src/tunnel.ts`) and fails with provisioning instructions instead. Tripwire: `tunnel.test.ts` asserts the generated script contains no npm or npx exec path. See below for how provisioning works.
+
+The Pi provider is a separate fork concern with its own marker and document: `git grep -n "fork:pi"` and `docs/internals/fork-pi-provider.md`.
+
+### Auditing an upstream merge
+
+Upstream is not hostile, but it is a large public codebase we do not review as it lands. Treat every sync as a supply-chain event: **nothing merges unaudited.** The point is not to re-review upstream's engineering, it is to answer one question — does anything here move our data somewhere new, or run code we did not choose?
+
+Work from the last audited sync commit, not from ahead/behind counts. Upstream rewrote `main`'s history in August 2026, so parts of it appear twice under different SHAs and `git cherry` reports every fork commit as unique. Record the sync commit in the merge message so the next audit has a real starting point.
+
+```
+git fetch upstream
+git log --no-merges --format='%h %an %s' <last-sync>..upstream/main
+git diff <last-sync>..upstream/main
+```
+
+Read the whole diff at least at file-name level, then look hard at:
+
+- **New or bumped dependencies.** `package.json` and `pnpm-lock.yaml` additions are the highest-risk item in any sync — a new transitive package is code we never read, running with our access. Justify every addition, and check `postinstall`/`prepare` scripts on anything new.
+- **New outbound network calls.** Grep the diff for `fetch(`, `http://`, `https://`, new hostnames, analytics or error-reporting SDKs. A crash reporter is telemetry wearing a different hat.
+- **The invariant files themselves.** Anything under `apps/server/src/telemetry/`, `apps/server/src/cloud/`, or `packages/ssh/`. Conflicts here are expected and always resolve toward the fork.
+- **Anything that reads outside the workspace.** Environment variables, `~/.t3` state, secrets, SSH config, git credentials — especially where the value then flows into a request body, a log line, or a provider prompt.
+- **Provider adapters.** A new endpoint or a widened prompt payload changes where our source code gets sent.
+- **CI and build config.** `.github/workflows`, build scripts, and Electron entitlements can exfiltrate or weaken the shipped app without touching product code.
+- **Auth, pairing, and permission paths.** Anything that widens who can connect, or what a connected client may do, is a data-access change.
+
+Then, before pushing the merge:
+
+- Run the tripwires: the telemetry, pinned-runtime, self-update, and tunnel tests above. They are the automated half of this audit and they must pass on the merged tree, not just on the fork's side.
+- Confirm `git grep -n "fork:lockdown"` still finds every marker — a vanished marker means an upstream hunk overwrote a lockdown edit.
+- If something in the diff is unclear, it does not merge until it is understood. "Probably fine" is not an audit result.
+
+### Remote environments (Coder / SSH)
+
+This fork is deployed to remote SSH hosts (e.g. Coder workspaces) from the local checkout, never from the published npm package. Provisioning works like this:
 
 - `scripts/setup-remote-t3.sh <ssh-host> [remote-dir]` rsyncs this checkout to the remote, builds `apps/server/dist/bin.mjs` there (mise-pinned node 24 + repo pnpm, `--frozen-lockfile`), and installs a `~/.local/bin/t3` shim pointing at that build. The launcher finds the shim via its `command -v t3` branch.
 - The script is idempotent: re-run it after changing the fork, then disconnect and reconnect the environment in the desktop app so the launcher restarts the server from the new build.
-- Do not reintroduce the npm install fallback — it would silently swap this fork's server for the upstream published one on any unprovisioned host.
+- Do not reintroduce the npm install fallback — it would silently swap this fork's server for the upstream published one on any unprovisioned host, which is invariant 3.
 - The remote host needs mise (`curl -fsSL https://mise.run | sh`) and a C toolchain for node-pty; everything else the script handles.
 
 ## Test data

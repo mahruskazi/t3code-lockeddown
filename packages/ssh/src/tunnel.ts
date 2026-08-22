@@ -411,6 +411,9 @@ ensure_remote_node_path() {
 }
 `;
 
+// [fork:lockdown] Upstream falls back to `npx t3@<version>` when the remote host
+// has no t3 on PATH. This fork has no npm fallback at all: a remote host runs the
+// build scripts/setup-remote-t3.sh put there, or it runs nothing.
 export const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
 set -eu
 @@T3_NODE_ENV_SCRIPT@@
@@ -426,10 +429,10 @@ fi
 if command -v t3 >/dev/null 2>&1; then
   exec t3 "$@"
 fi
-# This fork never installs t3 from the npm registry. The remote server must
-# be provisioned from a trusted source checkout: run scripts/setup-remote-t3.sh
-# from that checkout to build the server here and install a t3 shim on PATH,
-# then reconnect.
+# [fork:lockdown] This fork never installs t3 from the npm registry. The
+# remote server must be provisioned from a trusted source checkout: run
+# scripts/setup-remote-t3.sh from that checkout to build the server here and
+# install a t3 shim on PATH, then reconnect.
 printf 'Remote host has no t3 executable on PATH, and this T3 Code fork does not install %s from npm. Provision this host with scripts/setup-remote-t3.sh from your source checkout, then reconnect.\\n' @@T3_PACKAGE_SPEC@@ >&2
 exit 1
 `;

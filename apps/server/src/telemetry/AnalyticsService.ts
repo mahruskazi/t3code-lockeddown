@@ -182,7 +182,7 @@ export const make = Effect.gen(function* () {
 });
 
 /**
- * Locked-down fork: telemetry is permanently disabled. The live layer is the
+ * [fork:lockdown] Telemetry is permanently disabled. The live layer is the
  * no-op service, so the PostHog client above is never constructed, no flush
  * fiber runs, no identity files are read, and no environment variable can
  * re-enable sending. `make` is kept only to minimize the diff against

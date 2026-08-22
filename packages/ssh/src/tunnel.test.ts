@@ -100,6 +100,7 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
 }
 
 describe("ssh tunnel scripts", () => {
+  // [fork:lockdown] Tripwire: the generated runner must have no npm install path.
   it("builds the remote t3 runner without npm install fallbacks", () => {
     const script = buildRemoteT3RunnerScript({ nodeEngineRange: TEST_NODE_ENGINE_RANGE });
 
