@@ -105,6 +105,14 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   `tool_execution_start`, so the adapter caches them per `toolCallId` and
   re-emits the full `data` on update/end (clients drop `data` from started
   events and render from completed ones).
+- **Plans.** The pi-config `todo_write` tool's checklist (args on
+  `tool_execution_start`) is additionally emitted as `turn.plan.updated`
+  (same pattern as ClaudeAdapter's TodoWrite mapping), feeding the plan chip
+  and the sidebar "step N/M" working indicator. The tool row is preserved.
+- **Notifications.** Foreign extension `notify` events with `warning`/`error`
+  severity become `runtime.warning` work-log rows (bounded, consecutive
+  duplicates collapsed, per-session cap). `info` notifications and `t3-`
+  marker transports stay invisible.
 - **Models.** Pi models are `provider/modelId` slugs. The probe discovers the
   catalog via `get_available_models`; `set_model` switches in-session.
 - **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.

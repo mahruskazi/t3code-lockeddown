@@ -303,6 +303,66 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
     }),
   );
 
+  it.effect("maps todo_write to plan updates and surfaces extension warnings", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-rich-output-thread");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_TODOS: "1", PI_MOCK_NOTIFY: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (event.type === "turn.completed") {
+            yield* Deferred.succeed(turnCompleted, undefined);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "do the work", attachments: [] });
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      // The todo_write checklist feeds the plan surface…
+      const planUpdate = runtimeEvents.find((event) => event.type === "turn.plan.updated");
+      assert.isDefined(planUpdate);
+      if (planUpdate?.type === "turn.plan.updated") {
+        assert.isDefined(planUpdate.turnId);
+        assert.deepEqual(planUpdate.payload.plan, [
+          { step: "Write tests", status: "completed" },
+          { step: "Fix the bug", status: "inProgress" },
+          { step: "Ship it", status: "pending" },
+        ]);
+      }
+      // …while the tool row itself is preserved.
+      const todoItem = runtimeEvents.find(
+        (event) =>
+          event.type === "item.completed" &&
+          (event.payload.data as Record<string, unknown> | undefined)?.toolCallId === "todo-call-1",
+      );
+      assert.isDefined(todoItem);
+
+      // Warning notifications become one work-log row: consecutive
+      // duplicates are collapsed and info-level stays TUI-only.
+      const warnings = runtimeEvents.filter((event) => event.type === "runtime.warning");
+      assert.lengthOf(warnings, 1);
+      if (warnings[0]?.type === "runtime.warning") {
+        assert.equal(warnings[0].payload.message, "Typecheck failed: 2 errors");
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("interruptTurn settles a streaming turn as cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("pi-interrupt-thread");

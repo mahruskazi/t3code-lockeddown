@@ -15,6 +15,7 @@
  */
 import type {
   ProviderUserInputAnswers,
+  RuntimePlanStep,
   ServerProviderSkill,
   ThreadTokenUsageSnapshot,
   UserInputQuestion,
@@ -485,6 +486,8 @@ export function itemTypeForPiTool(
       return "file_change";
     case "fetch":
     case "web_search":
+    case "search":
+    case "scrape":
       return "web_search";
     default:
       return "dynamic_tool_call";
@@ -537,10 +540,53 @@ export function kindForPiTool(toolName: string): string | undefined {
       return "write";
     case "fetch":
     case "web_search":
+    case "search":
+    case "scrape":
+    case "fd":
+    case "rg":
       return "search";
     default:
       return undefined;
   }
+}
+
+// ── Todo plan ─────────────────────────────────────────────────────────
+
+/**
+ * The pi-config `todos.ts` extension registers a Claude-style `todo_write`
+ * tool whose args carry the complete checklist. Mapping it onto T3's
+ * `turn.plan.updated` (same as ClaudeAdapter does for TodoWrite) feeds the
+ * plan chip and the "step N/M" working indicator for free.
+ */
+export const PI_TODO_WRITE_TOOL_NAME = "todo_write";
+
+const MAX_PLAN_STEP_CHARS = 200;
+
+/**
+ * Map `todo_write` args onto plan steps. Returns `undefined` when the args
+ * are not a todo list at all, and `[]` for an explicit empty list (which
+ * clears the plan downstream, matching `/todos clear`). Entries without
+ * usable content are skipped; unknown statuses degrade to `pending`.
+ */
+export function planFromPiTodoWriteArgs(
+  args: Record<string, unknown>,
+): ReadonlyArray<RuntimePlanStep> | undefined {
+  if (!Array.isArray(args.todos)) {
+    return undefined;
+  }
+  const steps: Array<RuntimePlanStep> = [];
+  for (const entry of args.todos) {
+    if (!isRecord(entry)) continue;
+    const step = stringField(entry, "content")?.slice(0, MAX_PLAN_STEP_CHARS).trim();
+    if (!step) continue;
+    const status = stringField(entry, "status");
+    steps.push({
+      step,
+      status:
+        status === "completed" ? "completed" : status === "in_progress" ? "inProgress" : "pending",
+    });
+  }
+  return steps;
 }
 
 /**
@@ -635,6 +681,41 @@ export function parsePiExtensionUiRequest(event: PiRpcEvent): PiExtensionUiReque
     message: stringField(event, "message"),
     options,
   };
+}
+
+export type PiNotificationSeverity = "info" | "warning" | "error";
+
+export interface PiExtensionNotification {
+  readonly message: string;
+  readonly severity: PiNotificationSeverity;
+}
+
+/** Any `t3-…` marker rides notify/select as a transport, never as prose. */
+const T3_MARKER_PREFIX = "t3-";
+
+/**
+ * Parse a fire-and-forget extension `notify` into a displayable
+ * notification. Marker-prefixed messages (subagent lifecycle and future
+ * bridges) are transport, not prose, and are excluded here.
+ */
+export function parsePiExtensionNotification(
+  event: PiRpcEvent,
+): PiExtensionNotification | undefined {
+  const ui = parsePiExtensionUiRequest(event);
+  if (ui?.method !== "notify") {
+    return undefined;
+  }
+  const message = ui.message?.trim();
+  if (!message || message.startsWith(T3_MARKER_PREFIX)) {
+    return undefined;
+  }
+  const rawSeverity =
+    stringField(event, "notifyType") ??
+    stringField(event, "severity") ??
+    stringField(event, "level");
+  const severity: PiNotificationSeverity =
+    rawSeverity === "warning" || rawSeverity === "error" ? rawSeverity : "info";
+  return { message, severity };
 }
 
 export const T3_PI_SUBAGENT_EVENT_PREFIX = "t3-subagent:v1:";
