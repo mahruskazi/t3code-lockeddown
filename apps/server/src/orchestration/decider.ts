@@ -992,6 +992,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+          rewindSummary: targetThread.pendingRewindSummary ?? null,
           createdAt: command.createdAt,
         },
       };
@@ -1127,6 +1128,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+          restoreFiles: command.restoreFiles ?? true,
+          includeSummary: command.includeSummary ?? false,
           createdAt: command.createdAt,
         },
       };
@@ -1344,6 +1347,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           turnCount: command.turnCount,
+          summary: command.summary ?? null,
         },
       };
     }

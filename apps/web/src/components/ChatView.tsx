@@ -83,6 +83,7 @@ import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
   type ComposerSubmissionIntent,
+  isStandaloneRewindComposerCommand,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -266,6 +267,7 @@ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
+import { RewindThreadDialog, type RewindThreadRequest } from "./chat/RewindThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
@@ -1393,6 +1395,7 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  const [isRewindPickerOpen, setIsRewindPickerOpen] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -4978,7 +4981,18 @@ function ChatViewContent(props: ChatViewProps) {
   ]);
 
   const onRevertToTurnCount = useCallback(
-    async (turnCount: number) => {
+    async (
+      turnCount: number,
+      options?: {
+        readonly restoreFiles?: boolean;
+        readonly includeSummary?: boolean;
+        // The rewind picker is its own confirmation step, so it opts out of
+        // the extra confirm the inline message action needs.
+        readonly skipConfirm?: boolean;
+      },
+    ) => {
+      const restoreFiles = options?.restoreFiles ?? true;
+      const includeSummary = options?.includeSummary ?? false;
       const localApi = readLocalApi();
       if (!localApi || !activeThread || isRevertingCheckpoint) return;
 
@@ -4993,16 +5007,18 @@ function ChatViewContent(props: ChatViewProps) {
         setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
         return;
       }
-      const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) {
-        return;
+      if (options?.skipConfirm !== true) {
+        const confirmed = await localApi.dialogs.confirm(
+          [
+            `Revert this thread to checkpoint ${turnCount}?`,
+            "This will discard newer messages and turn diffs in this thread.",
+            "This action cannot be undone.",
+          ].join("\n"),
+          { variant: "destructive" },
+        );
+        if (!confirmed) {
+          return;
+        }
       }
 
       setIsRevertingCheckpoint(true);
@@ -5012,6 +5028,8 @@ function ChatViewContent(props: ChatViewProps) {
         input: {
           threadId: activeThread.id,
           turnCount,
+          restoreFiles,
+          includeSummary,
         },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
@@ -5036,6 +5054,31 @@ function ChatViewContent(props: ChatViewProps) {
       setThreadError,
     ],
   );
+
+  const onOpenRewindPicker = useCallback(() => {
+    setIsRewindPickerOpen(true);
+  }, []);
+
+  const onRewindFromPicker = useCallback(
+    (request: RewindThreadRequest) => {
+      setIsRewindPickerOpen(false);
+      void onRevertToTurnCount(request.turnCount, {
+        restoreFiles: request.restoreFiles,
+        includeSummary: request.includeSummary,
+        skipConfirm: true,
+      });
+    },
+    [onRevertToTurnCount],
+  );
+
+  // Mirrors the guards inside onRevertToTurnCount so the picker can explain
+  // why the button is dead instead of failing after the fact.
+  const rewindDisabledReason =
+    activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel
+      ? `Reconnect ${activeEnvironmentUnavailableLabel} before rewinding.`
+      : phase === "running" || isSendBusy || isConnecting
+        ? "Interrupt the current turn before rewinding."
+        : null;
 
   const onSend = async (
     e?: { preventDefault: () => void },
@@ -5162,6 +5205,16 @@ function ChatViewContent(props: ChatViewProps) {
     }
     // Legacy plan mode: /plan and /default only act when the beta flag is on;
     // otherwise they send as plain text like any other message.
+    // `/tree` on its own opens the rewind picker instead of being sent as a
+    // prompt, matching how /plan and /default are handled below.
+    if (isStandaloneRewindComposerCommand(trimmed)) {
+      promptRef.current = "";
+      clearComposerDraftContent(composerDraftTarget);
+      composerRef.current?.resetCursorState();
+      onOpenRewindPicker();
+      return;
+    }
+
     const standaloneSlashCommand =
       settings.planModeEnabled &&
       composerImages.length === 0 &&
@@ -6698,6 +6751,7 @@ function ChatViewContent(props: ChatViewProps) {
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}
                             onExpandImage={onExpandTimelineImage}
+                            onOpenRewindPicker={onOpenRewindPicker}
                           />
                         </div>
                       </div>
@@ -6803,6 +6857,15 @@ function ChatViewContent(props: ChatViewProps) {
                 onPrepared={handlePreparedPullRequestThread}
               />
             ) : null}
+
+            <RewindThreadDialog
+              open={isRewindPickerOpen}
+              thread={activeThread}
+              disabledReason={rewindDisabledReason}
+              isRewinding={isRevertingCheckpoint}
+              onOpenChange={setIsRewindPickerOpen}
+              onRewind={onRewindFromPicker}
+            />
           </div>
           {/* end chat column */}
         </div>

@@ -412,6 +412,10 @@ export const OrchestrationThread = Schema.Struct({
   pinOrderKey: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   // Pending-only state. Optional so older servers remain compatible.
   titleRegeneration: Schema.optional(Schema.NullOr(ThreadTitleRegeneration)),
+  // Set by a rewind that asked for a summary, and consumed by the next turn,
+  // which prepends it to the prompt so the provider keeps the context of work
+  // that was undone. Optional so payloads from pre-rewind servers still decode.
+  pendingRewindSummary: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
   proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
@@ -894,6 +898,11 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  // Rewinding the conversation is the constant; these two are the axes the
+  // rewind picker exposes. Optional so a client that predates the picker keeps
+  // the original "roll back everything" behavior (see the decider's defaults).
+  restoreFiles: Schema.optional(Schema.Boolean),
+  includeSummary: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -1027,6 +1036,9 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  // Null whenever the rewind ran without a summary; the reactor builds the
+  // text before the discarded turns leave the read model.
+  summary: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   createdAt: IsoDateTime,
 });
 
@@ -1255,6 +1267,10 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
   ),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  // Captured by the decider from the thread's pending rewind note, rather than
+  // re-read by the reactor: the user message that opens this turn already
+  // cleared the note, so the event is the only race-free carrier.
+  rewindSummary: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   createdAt: IsoDateTime,
 });
 
@@ -1281,12 +1297,15 @@ const ThreadUserInputResponseRequestedPayload = Schema.Struct({
 export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  restoreFiles: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  includeSummary: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   createdAt: IsoDateTime,
 });
 
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+  summary: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({

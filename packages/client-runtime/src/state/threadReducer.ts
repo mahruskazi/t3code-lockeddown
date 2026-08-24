@@ -372,6 +372,9 @@ export function applyThreadDetailEvent(
           ...thread,
           messages,
           checkpoints,
+          // The turn this user message opens carries the pending rewind
+          // summary into its prompt, so the note is spent here.
+          ...(event.payload.role === "user" ? { pendingRewindSummary: null } : {}),
           latestTurn,
           updatedAt: event.occurredAt,
         },
@@ -541,6 +544,7 @@ export function applyThreadDetailEvent(
           messages,
           proposedPlans,
           activities,
+          pendingRewindSummary: event.payload.summary ?? null,
           latestTurn:
             latestCheckpoint === null
               ? null

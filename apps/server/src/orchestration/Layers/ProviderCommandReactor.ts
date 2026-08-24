@@ -1150,9 +1150,16 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    // A summarized rewind leaves a note on the thread because the provider
+    // conversation has already lost those turns. This is the one place it can
+    // re-enter the provider's context: prefixed to the next prompt. The
+    // projections drop it on this same user message, so it rides exactly once.
+    const rewindSummary = event.payload.rewindSummary ?? null;
+    const messageText = rewindSummary ? `${rewindSummary}\n\n${message.text}` : message.text;
+
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
-      messageText: message.text,
+      messageText,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
       ...(event.payload.modelSelection !== undefined
         ? { modelSelection: event.payload.modelSelection }

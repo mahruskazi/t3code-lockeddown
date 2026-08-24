@@ -544,6 +544,9 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             messages: cappedMessages,
+            // The turn this user message opens carries the pending rewind
+            // summary into its prompt, so the note is spent here.
+            ...(payload.role === "user" ? { pendingRewindSummary: null } : {}),
             updatedAt: event.occurredAt,
           }),
         };
@@ -764,6 +767,7 @@ export function projectEvent(
               proposedPlans,
               activities,
               latestTurn,
+              pendingRewindSummary: payload.summary ?? null,
               updatedAt: event.occurredAt,
             }),
           };
