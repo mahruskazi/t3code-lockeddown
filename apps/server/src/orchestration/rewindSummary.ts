@@ -1,4 +1,8 @@
-import type { OrchestrationCheckpointSummary, OrchestrationMessage } from "@t3tools/contracts";
+import {
+  userMessageByTurnId,
+  type OrchestrationCheckpointSummary,
+  type OrchestrationMessage,
+} from "@t3tools/contracts";
 
 /**
  * Caps keep the summary useful as a prompt prefix rather than a transcript:
@@ -42,23 +46,11 @@ export function buildRewindSummary(input: RewindSummaryInput): string | null {
     return null;
   }
 
-  // The prompt that opened a turn is the last user message carrying its turn
-  // id; checkpoints and messages are joined on turnId rather than on order so
-  // interleaved activity cannot shift the pairing.
-  const promptByTurnId = new Map<string, string>();
-  for (const message of input.messages) {
-    if (message.role !== "user" || message.turnId === null) {
-      continue;
-    }
-    const text = collapseWhitespace(message.text);
-    if (text) {
-      promptByTurnId.set(message.turnId, text);
-    }
-  }
+  const openerByTurnId = userMessageByTurnId(input.messages);
 
   const omittedTurns = Math.max(0, discarded.length - MAX_SUMMARIZED_TURNS);
   const rendered = discarded.slice(0, MAX_SUMMARIZED_TURNS).map((checkpoint) => {
-    const prompt = promptByTurnId.get(checkpoint.turnId);
+    const prompt = collapseWhitespace(openerByTurnId.get(checkpoint.turnId)?.text ?? "");
     const paths = checkpoint.files.map((file) => file.path);
     const shownPaths = paths.slice(0, MAX_FILES_PER_TURN);
     const remainingPaths = paths.length - shownPaths.length;

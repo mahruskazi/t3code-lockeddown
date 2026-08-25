@@ -3,6 +3,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { buildRewindPoints } from "./rewindPoints.logic.ts";
 
+/**
+ * Builds a thread the way the projections really do: user messages carry a null
+ * turnId, and the turn is only identifiable from the assistant reply that
+ * follows. A fixture that puts a turnId on the prompt would pass while the real
+ * app renders "(no prompt recorded)" for every row.
+ */
 const thread = (input: {
   readonly checkpoints: ReadonlyArray<{
     readonly turn: number;
@@ -11,15 +17,26 @@ const thread = (input: {
   readonly prompts: ReadonlyArray<{ readonly turn: number; readonly text: string }>;
 }) =>
   ({
-    messages: input.prompts.map((prompt) => ({
-      id: `message-${prompt.turn}`,
-      role: "user",
-      text: prompt.text,
-      turnId: `turn-${prompt.turn}`,
-      streaming: false,
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-    })),
+    messages: input.prompts.flatMap((prompt) => [
+      {
+        id: `message-${prompt.turn}`,
+        role: "user",
+        text: prompt.text,
+        turnId: null,
+        streaming: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: `assistant-${prompt.turn}`,
+        role: "assistant",
+        text: "ok",
+        turnId: `turn-${prompt.turn}`,
+        streaming: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]),
     checkpoints: input.checkpoints.map((checkpoint) => ({
       turnId: `turn-${checkpoint.turn}`,
       checkpointTurnCount: checkpoint.turn,
@@ -98,6 +115,63 @@ describe("buildRewindPoints", () => {
 
     expect(points).toHaveLength(1);
     expect(points[0]?.turnCount).toBe(0);
+  });
+
+  it("resolves prompts queued while an earlier turn was still running", () => {
+    // Sending two messages back to back puts both prompts ahead of both
+    // replies. They still have to land on their own turns.
+    const points = buildRewindPoints({
+      checkpoints: [1, 2].map((turn) => ({
+        turnId: `turn-${turn}`,
+        checkpointTurnCount: turn,
+        checkpointRef: `r${turn}`,
+        status: "ready",
+        files: [],
+        assistantMessageId: null,
+        completedAt: "2026-01-01T00:00:00.000Z",
+      })),
+      messages: [
+        { id: "u1", role: "user", text: "first", turnId: null },
+        { id: "u2", role: "user", text: "second", turnId: null },
+        { id: "a1", role: "assistant", text: "ok", turnId: "turn-1" },
+        { id: "a2", role: "assistant", text: "ok", turnId: "turn-2" },
+      ].map((message) => ({
+        ...message,
+        streaming: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      })),
+    } as unknown as OrchestrationThread);
+
+    expect(points.map((point) => point.prompt)).toEqual(["second", "first"]);
+  });
+
+  it("ignores later assistant messages in the same turn", () => {
+    const points = buildRewindPoints({
+      checkpoints: [
+        {
+          turnId: "turn-1",
+          checkpointTurnCount: 1,
+          checkpointRef: "r1",
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      messages: [
+        { id: "u1", role: "user", text: "the real prompt", turnId: null },
+        { id: "a1", role: "assistant", text: "thinking", turnId: "turn-1" },
+        { id: "a2", role: "assistant", text: "still going", turnId: "turn-1" },
+      ].map((message) => ({
+        ...message,
+        streaming: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      })),
+    } as unknown as OrchestrationThread);
+
+    expect(points[0]?.prompt).toBe("the real prompt");
   });
 
   it("collapses whitespace in prompts so rows stay single-line", () => {

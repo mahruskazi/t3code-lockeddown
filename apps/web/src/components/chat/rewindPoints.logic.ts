@@ -1,4 +1,4 @@
-import type { MessageId, OrchestrationThread } from "@t3tools/contracts";
+import { userMessageByTurnId, type MessageId, type OrchestrationThread } from "@t3tools/contracts";
 
 /**
  * One selectable entry in the rewind picker: the state the thread returns to
@@ -34,16 +34,7 @@ export function buildRewindPoints(thread: OrchestrationThread | null): RewindPoi
     return [];
   }
 
-  const promptByTurnId = new Map<string, { text: string; messageId: MessageId }>();
-  for (const message of thread.messages) {
-    if (message.role !== "user" || message.turnId === null) {
-      continue;
-    }
-    const text = collapseWhitespace(message.text);
-    if (text) {
-      promptByTurnId.set(message.turnId, { text, messageId: message.id });
-    }
-  }
+  const openerByTurnId = userMessageByTurnId(thread.messages);
 
   const ordered = thread.checkpoints
     .filter((checkpoint) => checkpoint.checkpointTurnCount > 0)
@@ -53,11 +44,12 @@ export function buildRewindPoints(thread: OrchestrationThread | null): RewindPoi
 
   return ordered
     .map((checkpoint) => {
-      const prompt = promptByTurnId.get(checkpoint.turnId);
+      const opener = openerByTurnId.get(checkpoint.turnId);
+      const prompt = collapseWhitespace(opener?.text ?? "");
       return {
         turnCount: checkpoint.checkpointTurnCount - 1,
-        prompt: prompt?.text ?? "(no prompt recorded)",
-        messageId: prompt?.messageId ?? null,
+        prompt: prompt || "(no prompt recorded)",
+        messageId: opener?.id ?? null,
         fileCount: checkpoint.files.length,
         completedAt: checkpoint.completedAt ?? null,
         discardedTurnCount: Math.max(1, latestTurnCount - checkpoint.checkpointTurnCount + 1),

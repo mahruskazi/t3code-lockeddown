@@ -265,6 +265,49 @@ export const OrchestrationMessage = Schema.Struct({
 });
 export type OrchestrationMessage = typeof OrchestrationMessage.Type;
 
+/**
+ * Maps each turn to the user message that opened it.
+ *
+ * User messages are persisted with a null `turnId` - only assistant messages
+ * carry one - so a prompt is bound to its turn by position: the first assistant
+ * message after a prompt belongs to the turn that prompt started. Messages must
+ * be in creation order, which is how both the projections and the client
+ * reducer keep them.
+ *
+ * Prompts queued while an earlier turn is still running resolve in order, so a
+ * burst of messages does not shift every prompt onto the wrong turn.
+ */
+export function userMessageByTurnId(
+  messages: ReadonlyArray<OrchestrationMessage>,
+): Map<TurnId, OrchestrationMessage> {
+  const byTurnId = new Map<TurnId, OrchestrationMessage>();
+  const pendingUserMessages: Array<OrchestrationMessage> = [];
+
+  for (const message of messages) {
+    if (message.role === "user") {
+      // A prompt that already carries a turn id needs no inference.
+      if (message.turnId === null) {
+        pendingUserMessages.push(message);
+      } else if (!byTurnId.has(message.turnId)) {
+        byTurnId.set(message.turnId, message);
+      }
+      continue;
+    }
+    if (message.role !== "assistant" || message.turnId === null) {
+      continue;
+    }
+    if (byTurnId.has(message.turnId)) {
+      continue;
+    }
+    const opener = pendingUserMessages.shift();
+    if (opener) {
+      byTurnId.set(message.turnId, opener);
+    }
+  }
+
+  return byTurnId;
+}
+
 export const OrchestrationProposedPlanId = TrimmedNonEmptyString;
 export type OrchestrationProposedPlanId = typeof OrchestrationProposedPlanId.Type;
 

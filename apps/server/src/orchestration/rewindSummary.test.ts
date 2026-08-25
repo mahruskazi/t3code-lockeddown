@@ -27,26 +27,43 @@ const checkpoint = (input: {
     assistantMessageId: null,
   }) as unknown as OrchestrationCheckpointSummary;
 
+/**
+ * A prompt as the projections really store it: user messages carry a null
+ * turnId, so the turn is only identifiable from the assistant reply that
+ * follows. Fixtures that put a turnId on the prompt pass while the real app
+ * renders no prompt at all.
+ */
 const userMessage = (input: {
   readonly turn: number;
   readonly text: string;
-}): OrchestrationMessage =>
-  ({
-    id: MessageId.make(`message-${input.turn}`),
-    role: "user",
-    text: input.text,
-    turnId: TurnId.make(`turn-${input.turn}`),
-    streaming: false,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
-  }) as unknown as OrchestrationMessage;
+}): ReadonlyArray<OrchestrationMessage> =>
+  [
+    {
+      id: MessageId.make(`message-${input.turn}`),
+      role: "user",
+      text: input.text,
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: MessageId.make(`assistant-${input.turn}`),
+      role: "assistant",
+      text: "ok",
+      turnId: TurnId.make(`turn-${input.turn}`),
+      streaming: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ] as unknown as ReadonlyArray<OrchestrationMessage>;
 
 describe("buildRewindSummary", () => {
   it("returns null when the rewind discards nothing", () => {
     expect(
       buildRewindSummary({
         turnCount: 2,
-        messages: [userMessage({ turn: 1, text: "first" })],
+        messages: userMessage({ turn: 1, text: "first" }),
         checkpoints: [checkpoint({ turn: 1 }), checkpoint({ turn: 2 })],
         restoreFiles: true,
       }),
@@ -60,7 +77,7 @@ describe("buildRewindSummary", () => {
         userMessage({ turn: 1, text: "kept" }),
         userMessage({ turn: 2, text: "add rate limiting" }),
         userMessage({ turn: 3, text: "fix the failing test" }),
-      ],
+      ].flat(),
       checkpoints: [
         checkpoint({ turn: 1, files: ["kept.ts"] }),
         checkpoint({ turn: 2, files: ["src/limit.ts", "src/index.ts"] }),
@@ -79,7 +96,7 @@ describe("buildRewindSummary", () => {
   it("says whether the working tree was reverted", () => {
     const input = {
       turnCount: 0,
-      messages: [userMessage({ turn: 1, text: "do a thing" })],
+      messages: userMessage({ turn: 1, text: "do a thing" }),
       checkpoints: [checkpoint({ turn: 1, files: ["a.ts"] })],
     };
 
@@ -94,7 +111,7 @@ describe("buildRewindSummary", () => {
   it("reports turns that changed no files", () => {
     const summary = buildRewindSummary({
       turnCount: 0,
-      messages: [userMessage({ turn: 1, text: "what does this do?" })],
+      messages: userMessage({ turn: 1, text: "what does this do?" }),
       checkpoints: [checkpoint({ turn: 1, files: [] })],
       restoreFiles: true,
     });
@@ -102,13 +119,13 @@ describe("buildRewindSummary", () => {
     expect(summary).toContain('1. "what does this do?" — no file changes');
   });
 
-  it("pairs prompts to checkpoints by turn id, not by order", () => {
+  it("resolves each prompt from the assistant reply that followed it", () => {
     const summary = buildRewindSummary({
       turnCount: 0,
       messages: [
         userMessage({ turn: 2, text: "second prompt" }),
         userMessage({ turn: 1, text: "first prompt" }),
-      ],
+      ].flat(),
       checkpoints: [checkpoint({ turn: 1 }), checkpoint({ turn: 2 })],
       restoreFiles: true,
     });
@@ -121,7 +138,7 @@ describe("buildRewindSummary", () => {
     const turns = Array.from({ length: 15 }, (_, index) => index + 1);
     const summary = buildRewindSummary({
       turnCount: 0,
-      messages: turns.map((turn) => userMessage({ turn, text: "x".repeat(400) })),
+      messages: turns.flatMap((turn) => userMessage({ turn, text: "x".repeat(400) })),
       checkpoints: turns.map((turn) =>
         checkpoint({
           turn,
@@ -140,7 +157,7 @@ describe("buildRewindSummary", () => {
   it("collapses whitespace so a multi-line prompt stays one line", () => {
     const summary = buildRewindSummary({
       turnCount: 0,
-      messages: [userMessage({ turn: 1, text: "first line\n\nsecond   line" })],
+      messages: userMessage({ turn: 1, text: "first line\n\nsecond   line" }),
       checkpoints: [checkpoint({ turn: 1 })],
       restoreFiles: true,
     });

@@ -12,6 +12,7 @@ import {
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationLatestTurn,
+  type OrchestrationMessage,
   ProjectCreatedPayload,
   ProjectMetaUpdatedPayload,
   OrchestrationProposedPlan,
@@ -25,8 +26,10 @@ import {
   ThreadTurnDiff,
   ThreadTurnStartRequestedPayload,
   isProviderSendTurnSupportedImageMimeType,
+  userMessageByTurnId,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import { TurnId } from "./baseSchemas.ts";
 
 const decodeTurnDiffInput = Schema.decodeUnknownEffect(OrchestrationGetTurnDiffInput);
 const decodeFullThreadDiffInput = Schema.decodeUnknownEffect(OrchestrationGetFullThreadDiffInput);
@@ -955,4 +958,75 @@ it("isProviderSendTurnSupportedImageMimeType accepts raster formats and rejects 
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/png"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("IMAGE/JPEG"), true);
   assert.strictEqual(isProviderSendTurnSupportedImageMimeType("image/svg+xml"), false);
+});
+
+const message = (input: {
+  readonly id: string;
+  readonly role: "user" | "assistant";
+  readonly turnId: string | null;
+  readonly text?: string;
+}) =>
+  ({
+    id: input.id,
+    role: input.role,
+    text: input.text ?? "text",
+    turnId: input.turnId,
+    streaming: false,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+  }) as unknown as OrchestrationMessage;
+
+it("userMessageByTurnId binds each prompt to the turn its reply belongs to", () => {
+  // User messages are stored with a null turnId, so position is the only link.
+  const byTurnId = userMessageByTurnId([
+    message({ id: "u1", role: "user", turnId: null, text: "first" }),
+    message({ id: "a1", role: "assistant", turnId: "turn-1" }),
+    message({ id: "u2", role: "user", turnId: null, text: "second" }),
+    message({ id: "a2", role: "assistant", turnId: "turn-2" }),
+  ]);
+
+  assert.equal(byTurnId.get(TurnId.make("turn-1"))?.text, "first");
+  assert.equal(byTurnId.get(TurnId.make("turn-2"))?.text, "second");
+});
+
+it("userMessageByTurnId keeps queued prompts in order", () => {
+  const byTurnId = userMessageByTurnId([
+    message({ id: "u1", role: "user", turnId: null, text: "first" }),
+    message({ id: "u2", role: "user", turnId: null, text: "second" }),
+    message({ id: "a1", role: "assistant", turnId: "turn-1" }),
+    message({ id: "a2", role: "assistant", turnId: "turn-2" }),
+  ]);
+
+  assert.equal(byTurnId.get(TurnId.make("turn-1"))?.text, "first");
+  assert.equal(byTurnId.get(TurnId.make("turn-2"))?.text, "second");
+});
+
+it("userMessageByTurnId ignores repeat assistant messages within a turn", () => {
+  const byTurnId = userMessageByTurnId([
+    message({ id: "u1", role: "user", turnId: null, text: "first" }),
+    message({ id: "a1", role: "assistant", turnId: "turn-1" }),
+    message({ id: "a2", role: "assistant", turnId: "turn-1" }),
+    message({ id: "u2", role: "user", turnId: null, text: "second" }),
+    message({ id: "a3", role: "assistant", turnId: "turn-2" }),
+  ]);
+
+  assert.equal(byTurnId.size, 2);
+  assert.equal(byTurnId.get(TurnId.make("turn-1"))?.text, "first");
+  assert.equal(byTurnId.get(TurnId.make("turn-2"))?.text, "second");
+});
+
+it("userMessageByTurnId honors a prompt that already carries a turn id", () => {
+  const byTurnId = userMessageByTurnId([
+    message({ id: "u1", role: "user", turnId: "turn-1", text: "first" }),
+  ]);
+
+  assert.equal(byTurnId.get(TurnId.make("turn-1"))?.text, "first");
+});
+
+it("userMessageByTurnId yields nothing for a turn with no prompt before it", () => {
+  const byTurnId = userMessageByTurnId([
+    message({ id: "a1", role: "assistant", turnId: "turn-1" }),
+  ]);
+
+  assert.equal(byTurnId.size, 0);
 });
