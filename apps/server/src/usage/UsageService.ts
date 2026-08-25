@@ -37,6 +37,8 @@ import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+// [fork:pi]
+import { resolvePiSessionsDir } from "../provider/Drivers/PiHomeLayout.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -219,9 +221,15 @@ export const make = Effect.gen(function* () {
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
 
+    // [fork:pi] Pi's own session files are the transcript; nothing extra is
+    // written for us. Its settings carry no home path, so only the environment
+    // moves this.
+    const piSessionsDir = yield* resolvePiSessionsDir();
+
     return [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+      { provider: "pi" as const, dir: piSessionsDir },
     ];
   });
 

@@ -21,9 +21,13 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 4 as const;
+// [fork:pi] Bumped for the `pi` provider below: a client that predates it would
+// throw looking up presentation for a provider it has no entry for. An upstream
+// bump collides here; take upstream's number and add one for the fork.
+export const USAGE_CONTRACT_VERSION = 5 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex"]);
+// [fork:pi] `pi` is a fork-local provider.
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "pi"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**

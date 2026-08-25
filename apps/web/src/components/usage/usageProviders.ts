@@ -1,6 +1,8 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { ClaudeAI, type Icon, OpenAI } from "../Icons";
+// [fork:pi] Pi's mark is deliberately kept out of Icons.tsx.
+import { PiIcon } from "../PiIcon";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -23,6 +25,12 @@ export const PROVIDER_PRESENTATION = {
     label: "Claude Code",
     color: "#d97757",
     mark: ClaudeAI,
+  },
+  // [fork:pi]
+  pi: {
+    label: "Pi",
+    color: "#818cf8",
+    mark: PiIcon,
   },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 

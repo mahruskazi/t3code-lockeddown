@@ -24,6 +24,8 @@ import {
   parseCodexLine,
   type UsageRecord,
 } from "./usageTranscripts.ts";
+// [fork:pi]
+import { initialPiScanState, parsePiLine, piLineMightMatter } from "./piUsageTranscript.ts";
 
 export interface TranscriptFile {
   readonly path: string;
@@ -108,6 +110,8 @@ export async function readTranscriptRecords(
 ): Promise<readonly UsageRecord[] | null> {
   const records: UsageRecord[] = [];
   const codexState = initialCodexScanState();
+  // [fork:pi]
+  const piState = initialPiScanState();
 
   try {
     const lines = NodeReadline.createInterface({
@@ -116,6 +120,15 @@ export async function readTranscriptRecords(
     });
 
     for await (const line of lines) {
+      // [fork:pi] Pi carries its session id on a header line and its model on
+      // `model_change` entries, so those reach the reducer alongside usage.
+      if (provider === "pi") {
+        if (!piLineMightMatter(line)) continue;
+        const record = parsePiLine(line, piState);
+        if (record !== null) records.push(record);
+        continue;
+      }
+
       if (provider === "codex") {
         if (
           !mightCarryUsage(line, provider) &&
