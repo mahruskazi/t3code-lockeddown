@@ -85,6 +85,9 @@ describe("buildDayColumns", () => {
     expect(first?.bands).toEqual([
       { provider: "codex", value: 10 },
       { provider: "claude", value: 20 },
+      // [fork:pi] Bands are zero-filled per provider so the paths line up
+      // across days; Pi joins the order even on a day it did not run.
+      { provider: "pi", value: 0 },
     ]);
   });
 

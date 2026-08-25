@@ -68,6 +68,8 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
+  // [fork:pi] Pi is gated by `piLineMightMatter` in the reader instead, which
+  // also has to admit the header and model-change lines its parser needs.
   return provider === "claude" ? line.includes('"usage"') : line.includes('"token_count"');
 }
 

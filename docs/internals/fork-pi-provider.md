@@ -48,6 +48,12 @@ git grep -n "fork:pi"   # every fork touch point, at any time
 | `apps/web/src/components/chat/providerIconUtils.ts`          | Icon map entry + import                                                                                                         |
 | `apps/web/src/components/settings/ProviderModelsSection.tsx` | Custom-model placeholder entry                                                                                                  |
 | `apps/mobile/src/components/ProviderIcon.tsx`                | π icon branch                                                                                                                   |
+| `packages/contracts/src/usage.ts`                            | `pi` in `UsageProviderKind`; the `USAGE_CONTRACT_VERSION` bump that goes with it                                                |
+| `apps/server/src/usage/usageTranscriptReader.ts`             | Pi branch in the per-line reducer                                                                                               |
+| `apps/server/src/usage/usageTranscripts.ts`                  | Comment noting Pi gates in the reader instead                                                                                   |
+| `apps/server/src/usage/UsageService.ts`                      | Pi entry in `resolveTranscriptDirs`                                                                                             |
+| `apps/web/src/components/usage/usageProviders.ts`            | Pi presentation entry                                                                                                           |
+| `apps/mobile/src/features/usage/usageProviders.ts`           | Pi label, colour, and stack order                                                                                               |
 | `docs/internals/providers.md`                                | Driver table row + fork note                                                                                                    |
 
 Deliberately **not** touched (fallbacks handle the unknown driver kind):
@@ -118,11 +124,33 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
 - **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.
   Session files stay in Pi's own session dir, so `pi` in a terminal sees the
   same history.
-- **Usage.** `message_update.usage` totals are tracked, then `get_session_stats`
-  supplies Pi's active post-compaction token count and model context window.
-  The combined snapshot is published as `thread.token-usage.updated` on
-  message end and turn settlement (not per delta, to keep websocket volume
-  down).
+- **Context meter.** `message_update.usage` totals are tracked, then
+  `get_session_stats` supplies Pi's active post-compaction token count and model
+  context window. The combined snapshot is published as
+  `thread.token-usage.updated` on message end and turn settlement (not per
+  delta, to keep websocket volume down). This drives the per-thread meter only;
+  the Usage tab is fed separately, below.
+- **Usage tab.** The Usage page scans the provider CLIs' own session files, so
+  Pi needed a parser rather than anything new written at runtime. Pi appends
+  JSONL to `<sessionsDir>/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`
+  (`~/.pi/agent/sessions` by default, moved by `PI_CODING_AGENT_SESSION_DIR` or
+  `PI_CODING_AGENT_DIR`), and each assistant entry already carries provider,
+  model, an ISO timestamp, the token breakdown, and a cost Pi computed from the
+  model's own declared rates. That cost is preferred over our LiteLLM table:
+  it is the only thing that prices locally hosted and custom models, and it
+  honours tiered rates the table flattens. Compaction and branch-summary
+  entries bill for a real call, so they are counted too, attributed to
+  whichever model was last in use. Terminal `pi` runs land in the tab
+  alongside T3-driven ones, and existing history counts immediately.
+
+  Forking copies entries verbatim into the new file, so records de-duplicate on
+  the provider's response id when there is one, and otherwise on the entry id
+  plus the message instant and token total — Pi shortens entry ids to eight
+  characters and only checks for collisions within a single file.
+
+  One-shot `--no-session` runs (commit and PR message generation) write no
+  session file and so are not counted.
+
 - **Skills.** The provider probe reads `get_commands`, maps loaded skill
   commands into the provider snapshot, and exposes them to the composer's `$`
   picker.
