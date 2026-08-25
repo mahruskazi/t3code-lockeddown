@@ -850,7 +850,24 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        case "thread.message-sent":
+        case "thread.message-sent": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          // The turn this user message opens is the one that prepends the
+          // pending rewind summary to its prompt, so the note is spent here.
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            ...(event.payload.role === "user" ? { pendingRewindSummary: null } : {}),
+            updatedAt: event.occurredAt,
+          });
+          yield* refreshThreadShellSummary(event.payload.threadId);
+          return;
+        }
+
         case "thread.proposed-plan-upserted":
         case "thread.activity-appended":
         case "thread.approval-response-requested":
@@ -934,6 +951,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             latestTurnId,
+            pendingRewindSummary: event.payload.summary ?? null,
             updatedAt: event.occurredAt,
           });
           yield* refreshThreadShellSummary(event.payload.threadId);

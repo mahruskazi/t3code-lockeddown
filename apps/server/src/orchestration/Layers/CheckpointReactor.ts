@@ -22,6 +22,7 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 
 import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
+import { buildRewindSummary } from "../rewindSummary.ts";
 import {
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
@@ -755,24 +756,40 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: sessionRuntime.value.cwd,
-      checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
-    });
-    if (!restored) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
+    // Rewinding the conversation is unconditional; restoring the working tree
+    // is the axis the rewind picker exposes. A conversation-only rewind leaves
+    // the files exactly as the discarded turns left them.
+    if (event.payload.restoreFiles) {
+      const restored = yield* checkpointStore.restoreCheckpoint({
+        cwd: sessionRuntime.value.cwd,
+        checkpointRef: targetCheckpointRef,
+        fallbackToHead: event.payload.turnCount === 0,
+      });
+      if (!restored) {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+
+      // Refresh the workspace entry index so the @-mention file picker
+      // reflects the reverted filesystem state.
+      yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
     }
 
-    // Refresh the workspace entry index so the @-mention file picker
-    // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    // Built before the discarded turns leave the read model, and only when the
+    // rewind asked for it.
+    const summary = event.payload.includeSummary
+      ? buildRewindSummary({
+          turnCount: event.payload.turnCount,
+          messages: thread.messages,
+          checkpoints: thread.checkpoints,
+          restoreFiles: event.payload.restoreFiles,
+        })
+      : null;
 
     const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
@@ -802,6 +819,7 @@ const make = Effect.gen(function* () {
         commandId: yield* serverCommandId("checkpoint-revert-complete"),
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
+        summary,
         createdAt: now,
       })
       .pipe(

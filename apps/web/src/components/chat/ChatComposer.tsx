@@ -633,6 +633,7 @@ export interface ChatComposerProps {
   scheduleComposerFocus: () => void;
   setThreadError: (threadId: ThreadId | null, error: string | null) => void;
   onExpandImage: (preview: ExpandedImagePreview) => void;
+  onOpenRewindPicker: () => void;
 }
 
 // --------------------------------------------------------------------------
@@ -1087,6 +1088,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           command: "model",
           label: "/model",
           description: "Switch response model for this thread",
+        },
+        {
+          id: "slash:tree",
+          type: "slash-command",
+          command: "tree",
+          label: "/tree",
+          description: "Rewind this conversation to an earlier message",
         },
         ...(planModeUiEnabled
           ? ([
@@ -1758,6 +1766,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.type === "slash-command") {
+        if (item.command === "tree") {
+          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+            expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+            focusEditorAfterReplace: false,
+          });
+          if (applied) {
+            setComposerHighlightedItemId(null);
+            props.onOpenRewindPicker();
+          }
+          return;
+        }
         if (item.command === "model") {
           const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
             expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
@@ -1815,7 +1834,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
     },
-    [applyPromptReplacement, handleInteractionModeChange, resolveActiveComposerTrigger],
+    [
+      applyPromptReplacement,
+      handleInteractionModeChange,
+      props.onOpenRewindPicker,
+      resolveActiveComposerTrigger,
+    ],
   );
 
   const onComposerMenuItemHighlighted = useCallback(

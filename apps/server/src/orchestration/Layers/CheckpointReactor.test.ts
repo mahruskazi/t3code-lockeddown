@@ -1001,56 +1001,100 @@ describe("CheckpointReactor", () => {
     ).toBe(true);
   });
 
+  /** Dispatches a rewind with explicit axes, through the harness's single runner. */
+  async function dispatchRevert(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    input: {
+      readonly commandId: string;
+      readonly createdAt: string;
+      readonly turnCount: number;
+      readonly restoreFiles?: boolean;
+      readonly includeSummary?: boolean;
+    },
+  ) {
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make(input.commandId),
+        threadId: ThreadId.make("thread-1"),
+        turnCount: input.turnCount,
+        ...(input.restoreFiles !== undefined ? { restoreFiles: input.restoreFiles } : {}),
+        ...(input.includeSummary !== undefined ? { includeSummary: input.includeSummary } : {}),
+        createdAt: input.createdAt,
+      }),
+    );
+  }
+
+  /**
+   * Seeds a thread with a ready provider session and one completed turn per entry
+   * in `turns`, so revert tests start from a thread that has something to rewind.
+   */
+  async function seedRevertableThread(
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    input: {
+      readonly commandPrefix: string;
+      readonly createdAt: string;
+      readonly turns: ReadonlyArray<{
+        readonly turn: number;
+        readonly files?: ReadonlyArray<{
+          readonly path: string;
+          readonly kind: string;
+          readonly additions: number;
+          readonly deletions: number;
+        }>;
+      }>;
+    },
+  ) {
+    await Effect.runPromise(
+      harness.engine
+        .dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`${input.commandPrefix}-session-set`),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "ready",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        })
+        .pipe(
+          Effect.andThen(
+            Effect.forEach(
+              input.turns,
+              (entry) =>
+                harness.engine.dispatch({
+                  type: "thread.turn.diff.complete",
+                  commandId: CommandId.make(`${input.commandPrefix}-diff-${entry.turn}`),
+                  threadId: ThreadId.make("thread-1"),
+                  turnId: asTurnId(`turn-${entry.turn}`),
+                  completedAt: input.createdAt,
+                  checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), entry.turn),
+                  status: "ready",
+                  files: entry.files ?? [],
+                  checkpointTurnCount: entry.turn,
+                  createdAt: input.createdAt,
+                }),
+              { concurrency: 1 },
+            ),
+          ),
+        ),
+    );
+  }
+
   it("executes provider revert and emits thread.reverted for checkpoint revert requests", async () => {
     const harness = await createHarness();
     const createdAt = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "codex",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-diff-1"),
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-        completedAt: createdAt,
-        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
-        status: "ready",
-        files: [],
-        checkpointTurnCount: 1,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-diff-2"),
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-2"),
-        completedAt: createdAt,
-        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
-        status: "ready",
-        files: [],
-        checkpointTurnCount: 2,
-        createdAt,
-      }),
-    );
+    await seedRevertableThread(harness, {
+      commandPrefix: "cmd",
+      createdAt,
+      turns: [{ turn: 1 }, { turn: 2 }],
+    });
 
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -1080,6 +1124,69 @@ describe("CheckpointReactor", () => {
     expect(
       gitRefExists(harness.cwd, checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2)),
     ).toBe(false);
+  });
+
+  it("leaves the working tree alone when a rewind opts out of restoring files", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await seedRevertableThread(harness, {
+      commandPrefix: "cmd-no-files",
+      createdAt,
+      turns: [{ turn: 1 }, { turn: 2 }],
+    });
+
+    await dispatchRevert(harness, {
+      commandId: "cmd-revert-no-files",
+      createdAt,
+      turnCount: 1,
+      restoreFiles: false,
+    });
+
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+
+    // The conversation still rewinds; only the filesystem is left untouched.
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
+      threadId: ThreadId.make("thread-1"),
+      numTurns: 1,
+    });
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
+  });
+
+  it("carries a rewind summary onto the thread only when the rewind asks for one", async () => {
+    const harness = await createHarness();
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await seedRevertableThread(harness, {
+      commandPrefix: "cmd-summary",
+      createdAt,
+      turns: [1, 2].map((turn) => ({
+        turn,
+        files: [{ path: `turn-${turn}.ts`, kind: "modified", additions: 1, deletions: 0 }],
+      })),
+    });
+
+    await dispatchRevert(harness, {
+      commandId: "cmd-revert-summary",
+      createdAt,
+      turnCount: 1,
+      includeSummary: true,
+    });
+
+    const events = await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    const reverted = events.find((event) => event.type === "thread.reverted");
+    const summary = (reverted?.payload as { readonly summary?: string | null } | undefined)
+      ?.summary;
+    expect(summary).toContain("rewound this conversation to turn 1");
+    expect(summary).toContain("turn-2.ts");
+
+    // Read the full projection rather than waitForThread's narrowed view: the
+    // pending note is what the next turn will carry into the prompt.
+    await waitForThread(harness.readModel, (entry) => entry.checkpoints.length === 1);
+    const snapshot = await harness.readModel();
+    const thread = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.pendingRewindSummary).toBe(summary);
   });
 
   it("executes provider revert and emits thread.reverted for claude sessions", async () => {

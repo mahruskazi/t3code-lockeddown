@@ -7,6 +7,7 @@ import {
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   isCollapsedCursorAdjacentToInlineToken,
+  isStandaloneRewindComposerCommand,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "./composer-logic";
@@ -413,5 +414,23 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+
+  it("does not treat /tree as an interaction mode", () => {
+    expect(parseStandaloneComposerSlashCommand("/tree")).toBeNull();
+  });
+});
+
+describe("isStandaloneRewindComposerCommand", () => {
+  it("matches /tree alone, regardless of surrounding space or case", () => {
+    expect(isStandaloneRewindComposerCommand("/tree")).toBe(true);
+    expect(isStandaloneRewindComposerCommand("  /tree  ")).toBe(true);
+    expect(isStandaloneRewindComposerCommand("/TREE")).toBe(true);
+  });
+
+  it("ignores /tree carrying message text, so it sends as a prompt", () => {
+    expect(isStandaloneRewindComposerCommand("/tree please")).toBe(false);
+    expect(isStandaloneRewindComposerCommand("look at /tree")).toBe(false);
+    expect(isStandaloneRewindComposerCommand("/treehouse")).toBe(false);
   });
 });
