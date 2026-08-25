@@ -1,6 +1,25 @@
 import { userMessageByTurnId, type MessageId, type OrchestrationThread } from "@t3tools/contracts";
 
 /**
+ * What the picker starts with each time it opens.
+ *
+ * Both axes are off: rewinding the conversation is always safe to undo by
+ * re-asking, but rewriting the working tree can discard uncommitted work, so it
+ * is opted into rather than out of.
+ */
+export interface RewindOptions {
+  /** Whether the rewind also restores the working tree to the checkpoint. */
+  readonly restoreFiles: boolean;
+  /** Whether the agent keeps a note of the discarded work. */
+  readonly includeSummary: boolean;
+}
+
+export const DEFAULT_REWIND_OPTIONS: RewindOptions = {
+  restoreFiles: false,
+  includeSummary: false,
+};
+
+/**
  * One selectable entry in the rewind picker: the state the thread returns to
  * when the turn that follows it is discarded.
  */

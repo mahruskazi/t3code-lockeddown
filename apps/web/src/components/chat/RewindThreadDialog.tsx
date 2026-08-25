@@ -13,7 +13,11 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { buildRewindPoints, type RewindPoint } from "./rewindPoints.logic.ts";
+import {
+  buildRewindPoints,
+  DEFAULT_REWIND_OPTIONS,
+  type RewindPoint,
+} from "./rewindPoints.logic.ts";
 
 export interface RewindThreadRequest {
   readonly turnCount: number;
@@ -46,16 +50,16 @@ export function RewindThreadDialog({
 }: RewindThreadDialogProps) {
   const points = useMemo(() => buildRewindPoints(thread), [thread]);
   const [selectedTurnCount, setSelectedTurnCount] = useState<number | null>(null);
-  const [restoreFiles, setRestoreFiles] = useState(true);
-  const [includeSummary, setIncludeSummary] = useState(false);
+  const [restoreFiles, setRestoreFiles] = useState(DEFAULT_REWIND_OPTIONS.restoreFiles);
+  const [includeSummary, setIncludeSummary] = useState(DEFAULT_REWIND_OPTIONS.includeSummary);
 
   // Each opening starts from the most recent point with the default axes, so a
   // choice made in one rewind never silently carries into the next.
   useEffect(() => {
     if (open) {
       setSelectedTurnCount(points[0]?.turnCount ?? null);
-      setRestoreFiles(true);
-      setIncludeSummary(false);
+      setRestoreFiles(DEFAULT_REWIND_OPTIONS.restoreFiles);
+      setIncludeSummary(DEFAULT_REWIND_OPTIONS.includeSummary);
     }
   }, [open, points]);
 

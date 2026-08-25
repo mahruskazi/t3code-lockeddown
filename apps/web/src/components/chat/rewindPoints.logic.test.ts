@@ -1,7 +1,7 @@
 import type { OrchestrationThread } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildRewindPoints } from "./rewindPoints.logic.ts";
+import { buildRewindPoints, DEFAULT_REWIND_OPTIONS } from "./rewindPoints.logic.ts";
 
 /**
  * Builds a thread the way the projections really do: user messages carry a null
@@ -52,6 +52,15 @@ const thread = (input: {
       completedAt: "2026-01-01T00:00:00.000Z",
     })),
   }) as unknown as OrchestrationThread;
+
+describe("DEFAULT_REWIND_OPTIONS", () => {
+  it("leaves both axes off so a rewind touches only the conversation", () => {
+    // Restoring the working tree can discard uncommitted work, so the picker
+    // must never arrive pre-armed to do it.
+    expect(DEFAULT_REWIND_OPTIONS.restoreFiles).toBe(false);
+    expect(DEFAULT_REWIND_OPTIONS.includeSummary).toBe(false);
+  });
+});
 
 describe("buildRewindPoints", () => {
   it("returns nothing for a missing thread or one with no turns", () => {
