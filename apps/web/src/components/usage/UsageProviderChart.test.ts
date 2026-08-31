@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildDayColumns, niceScale } from "./UsageProviderChart";
+import { providersWithUsage } from "./usageProviders";
 
 describe("niceScale", () => {
   it("never puts the peak above the top of the scale", () => {
@@ -86,7 +87,8 @@ describe("buildDayColumns", () => {
       { provider: "codex", value: 10 },
       { provider: "claude", value: 20 },
       // [fork:pi] Bands are zero-filled per provider so the paths line up
-      // across days; Pi joins the order even on a day it did not run.
+      // across days; Grok and Pi join the order even on a day they did not run.
+      { provider: "grok", value: 0 },
       { provider: "pi", value: 0 },
     ]);
   });
@@ -96,6 +98,17 @@ describe("buildDayColumns", () => {
       const sum = column.bands.reduce((running, band) => running + band.value, 0);
       expect(column.total).toBeCloseTo(sum, 9);
     }
+  });
+});
+
+describe("providersWithUsage", () => {
+  it("omits providers with no cost or tokens", () => {
+    expect(
+      providersWithUsage([
+        { provider: "codex", costUsd: 0, totalTokens: 0 },
+        { provider: "claude", costUsd: 0, totalTokens: 200 },
+      ]),
+    ).toEqual(["claude"]);
   });
 });
 
