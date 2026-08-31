@@ -6,26 +6,28 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
  * order, so it also fixes which band sits on top of the bars.
  */
 // [fork:pi] `pi` stacks last.
-export const PROVIDER_ORDER: readonly UsageProviderKind[] = ["codex", "claude", "pi"];
+export const PROVIDER_ORDER: readonly UsageProviderKind[] = ["codex", "claude", "grok", "pi"];
 
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   claude: "Claude Code",
   codex: "Codex",
+  grok: "Grok Build",
   // [fork:pi]
   pi: "Pi",
 };
 
 /**
- * Claude's brand orange holds in both themes; Codex is neutral and must flip
- * with the theme or its bars vanish against the matching background. Pi's own
- * mark is monochrome, so its band gets an indigo that stays legible either way
- * and cannot be confused with Codex's neutral.
+ * Claude's brand orange holds in both themes; Codex and Grok are neutrals and
+ * must flip with the theme or their bars vanish against the matching background.
+ * Pi's own mark is monochrome, so its band gets an indigo that stays legible
+ * either way and cannot be confused with the Codex or Grok neutrals.
  */
 export function useProviderColors(): Record<UsageProviderKind, string> {
   const { themeAppearance: scheme } = useAppearancePreferences();
   return {
     claude: "#d97757",
     codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",
+    grok: scheme === "dark" ? "#a1a1aa" : "#52525b",
     // [fork:pi]
     pi: "#818cf8",
   };
