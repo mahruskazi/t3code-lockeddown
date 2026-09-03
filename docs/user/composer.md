@@ -31,6 +31,12 @@ and shows **Attach again** next to it. Attach the file again or remove it, then 
 On web and desktop, HEIC and HEIF photos are automatically converted to JPEG when you drag them into
 the composer or paste them into a message.
 
+When T3 Code runs on the same machine as the environment, dragging files or folders from your file
+manager into a thread adds their paths to the message instead of uploading them, so the agent reads
+them where they already are. Paths inside the project are added relative to it, and anything outside
+keeps its full path. Images still attach, and on a remote environment every dropped file attaches as
+before. To attach a file that would otherwise be added by path, use the attachment button.
+
 On mobile, the model picker shows each OpenCode model's upstream provider, such as Anthropic,
 GitHub Copilot, or OpenCode Zen, beneath its name. Search by that provider name to narrow the list
 when starting a thread or changing an existing thread's model.

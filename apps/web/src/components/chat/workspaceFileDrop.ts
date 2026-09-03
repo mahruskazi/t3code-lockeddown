@@ -2,6 +2,7 @@ export interface WorkspaceFileDragEvent {
   readonly dataTransfer: {
     readonly types: ReadonlyArray<string>;
     readonly files: Iterable<File>;
+    getData(format: string): string;
     dropEffect: string;
   };
   readonly relatedTarget: EventTarget | null;
@@ -11,9 +12,19 @@ export interface WorkspaceFileDragEvent {
   preventDefault(): void;
 }
 
+export interface WorkspaceFileDrop {
+  readonly files: File[];
+  /**
+   * The drag's `text/uri-list`, empty when the source withheld one. Carried
+   * alongside the bytes because it is the only place a browser exposes where
+   * a dropped file actually lives.
+   */
+  readonly uriList: string;
+}
+
 export interface WorkspaceFileDropHost {
   setDragActive(active: boolean): void;
-  addFiles(files: File[]): void;
+  addDrop(drop: WorkspaceFileDrop): void;
 }
 
 function isFileDrag(event: WorkspaceFileDragEvent): boolean {
@@ -48,7 +59,10 @@ export function makeWorkspaceFileDropHandlers(host: WorkspaceFileDropHost) {
       if (!isFileDrag(event)) return;
       event.preventDefault();
       host.setDragActive(false);
-      host.addFiles(Array.from(event.dataTransfer.files));
+      host.addDrop({
+        files: Array.from(event.dataTransfer.files),
+        uriList: event.dataTransfer.getData("text/uri-list"),
+      });
     },
   };
 }

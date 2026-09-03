@@ -165,6 +165,11 @@ import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
+import { useRemoteOpenState } from "../remoteOpen";
+import {
+  resolveDroppedComposerItems,
+  splitDroppedComposerItems,
+} from "./chat/composerDroppedPaths";
 import {
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
@@ -2987,6 +2992,15 @@ function ChatViewContent(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  // Same signal "Open in editor" uses to decide whether it can exec on this
+  // machine: it is exactly the question a dropped path has to answer.
+  const remoteOpenMode = useRemoteOpenState(environmentId).mode;
+  // Only Electron can map a dropped `File` back to disk. A browser falls
+  // through to whatever the drag's `text/uri-list` named.
+  const readDroppedFilePath = useCallback(
+    (file: File) => window.desktopBridge?.getPathForFile?.(file) ?? null,
+    [],
+  );
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -7124,9 +7138,42 @@ function ChatViewContent(props: ChatViewProps) {
     ) : null
   ) : null;
 
+  // A drop that resolves to a path is worth more as a mention than as an
+  // upload, but only where the agent can open that path: on a remote
+  // environment it names a file on the wrong machine, so those drops keep
+  // uploading their bytes.
+  const canMentionDroppedPaths = remoteOpenMode === "local-exec";
   const workspaceFileDropHandlers = makeWorkspaceFileDropHandlers({
     setDragActive: setIsWorkspaceFileDragActive,
-    addFiles: (files) => composerRef.current?.addDroppedFiles(files),
+    addDrop: ({ files, uriList }) => {
+      const composer = composerRef.current;
+      if (!composer) return;
+      if (!canMentionDroppedPaths) {
+        composer.addDroppedFiles(files);
+        return;
+      }
+      const { attachments, mentions } = splitDroppedComposerItems({
+        items: resolveDroppedComposerItems({
+          files,
+          uriList,
+          readFilePath: readDroppedFilePath,
+        }),
+        workspaceRoot: activeWorkspaceRoot ?? null,
+      });
+      if (attachments.length > 0) {
+        composer.addDroppedFiles(attachments);
+      }
+      if (mentions.length === 0) return;
+      if (!composer.insertTextAtEnd(`${mentions.join(" ")} `, { ensureLeadingBoundary: true })) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to add to chat",
+          description: "The composer is busy; try again once it is ready.",
+        });
+        return;
+      }
+      scheduleComposerFocus();
+    },
   });
 
   return (
@@ -7206,7 +7253,9 @@ function ChatViewContent(props: ChatViewProps) {
                   className="flex items-center gap-2 rounded-full border border-primary/25 bg-background/95 px-4 py-2.5 text-sm font-medium text-foreground shadow-lg"
                 >
                   <PaperclipIcon className="size-4 text-primary" aria-hidden="true" />
-                  Drop files to attach
+                  {canMentionDroppedPaths
+                    ? "Drop files to add them to chat"
+                    : "Drop files to attach"}
                 </div>
               </div>
             ) : null}

@@ -8,6 +8,7 @@ import {
 function makeDragEvent(options?: {
   types?: string[];
   files?: File[];
+  uriList?: string;
   movedWithinTarget?: boolean;
 }) {
   const preventDefault = vi.fn();
@@ -15,6 +16,7 @@ function makeDragEvent(options?: {
     dataTransfer: {
       types: options?.types ?? ["Files"],
       files: options?.files ?? [],
+      getData: (format: string) => (format === "text/uri-list" ? (options?.uriList ?? "") : ""),
       dropEffect: "none",
     },
     relatedTarget: options?.movedWithinTarget ? ({} as EventTarget) : null,
@@ -28,9 +30,9 @@ function makeDragEvent(options?: {
 
 function makeHost() {
   const setDragActive = vi.fn();
-  const addFiles = vi.fn();
-  const host = { setDragActive, addFiles } satisfies WorkspaceFileDropHost;
-  return { host, setDragActive, addFiles };
+  const addDrop = vi.fn();
+  const host = { setDragActive, addDrop } satisfies WorkspaceFileDropHost;
+  return { host, setDragActive, addDrop };
 }
 
 describe("makeWorkspaceFileDropHandlers", () => {
@@ -65,14 +67,17 @@ describe("makeWorkspaceFileDropHandlers", () => {
     expect(setDragActive).not.toHaveBeenCalled();
   });
 
-  it("forwards dropped files and clears the active state", () => {
+  it("forwards dropped files with the drag's uri list and clears the active state", () => {
     const file = new File(["contents"], "example.txt", { type: "text/plain" });
-    const { host, setDragActive, addFiles } = makeHost();
-    const { event } = makeDragEvent({ files: [file] });
+    const { host, setDragActive, addDrop } = makeHost();
+    const { event } = makeDragEvent({ files: [file], uriList: "file:///tmp/example.txt" });
 
     makeWorkspaceFileDropHandlers(host).onDrop(event);
 
     expect(setDragActive).toHaveBeenCalledWith(false);
-    expect(addFiles).toHaveBeenCalledWith([file]);
+    expect(addDrop).toHaveBeenCalledWith({
+      files: [file],
+      uriList: "file:///tmp/example.txt",
+    });
   });
 });
