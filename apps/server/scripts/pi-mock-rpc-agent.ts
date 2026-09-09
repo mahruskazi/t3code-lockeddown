@@ -26,6 +26,8 @@ import * as NodeFS from "node:fs";
 const uiLogPath = process.env.PI_MOCK_UI_LOG_PATH;
 const exitLogPath = process.env.PI_MOCK_EXIT_LOG_PATH;
 const argsLogPath = process.env.PI_MOCK_ARGS_LOG_PATH;
+/** Appends every command received, so tests can assert order as well as payload. */
+const commandLogPath = process.env.PI_MOCK_COMMAND_LOG_PATH;
 const emitApproval = process.env.PI_MOCK_APPROVAL === "1";
 const emitUserInput = process.env.PI_MOCK_USER_INPUT === "1";
 const hangPrompt = process.env.PI_MOCK_HANG_PROMPT === "1";
@@ -51,7 +53,10 @@ const state = {
   isStreaming: false,
   sessionId: "mock-pi-session-1",
   sessionFile,
+  thinkingLevel: "medium",
 };
+
+
 
 function writeLine(value: unknown) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -294,12 +299,16 @@ async function runTurn() {
 
 function handleCommand(command: Record<string, unknown>) {
   const id = typeof command.id === "string" ? command.id : undefined;
+  if (commandLogPath) {
+    const { id: _id, ...logged } = command;
+    NodeFS.appendFileSync(commandLogPath, `${JSON.stringify(logged)}\n`);
+  }
   switch (command.type) {
     case "get_state":
       respond(id, "get_state", {
         data: {
           model: state.model,
-          thinkingLevel: "medium",
+          thinkingLevel: state.thinkingLevel,
           isStreaming: state.isStreaming,
           isCompacting: false,
           steeringMode: "all",
@@ -317,8 +326,20 @@ function handleCommand(command: Record<string, unknown>) {
       respond(id, "get_available_models", {
         data: {
           models: [
-            { provider: "anthropic", id: "claude-sonnet-5", name: "Claude Sonnet 5" },
-            { provider: "openai", id: "gpt-5", name: "GPT-5" },
+            {
+              provider: "anthropic",
+              id: "claude-sonnet-5",
+              name: "Claude Sonnet 5",
+              reasoning: true,
+            },
+            {
+              provider: "openai",
+              id: "gpt-5",
+              name: "GPT-5",
+              reasoning: true,
+              thinkingLevelMap: { minimal: "minimal", xhigh: "xhigh", max: "max" },
+            },
+            { provider: "local", id: "no-reasoning", name: "No Reasoning" },
           ],
         },
       });
@@ -347,7 +368,16 @@ function handleCommand(command: Record<string, unknown>) {
         return;
       }
       state.model = { provider, id: modelId, name: modelId };
+      // Pi recomputes the level on every switch; mirror that so a test can
+      // catch a `set_thinking_level` sent before its `set_model`.
+      state.thinkingLevel = "medium";
       respond(id, "set_model");
+      return;
+    }
+    case "set_thinking_level": {
+      const level = typeof command.level === "string" ? command.level : "";
+      state.thinkingLevel = level;
+      respond(id, "set_thinking_level");
       return;
     }
     case "prompt": {

@@ -187,15 +187,130 @@ export function piModelSlugFromRecord(value: unknown): string | undefined {
   return modelId ?? undefined;
 }
 
+// ── Thinking levels ───────────────────────────────────────────────────
+
+/**
+ * Pi's thinking-level scale, weakest first. Mirrors Pi's own
+ * `THINKING_LEVEL_OPTIONS`: the order is both the order Pi cycles through and
+ * the order we present in the picker.
+ */
+export const PI_THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
+
+/**
+ * Descriptor id for the thinking-level picker, shared by the snapshot that
+ * publishes it and the adapter that reads the selection back.
+ */
+export const PI_THINKING_LEVEL_OPTION_ID = "thinkingLevel";
+
+/** Display labels, following the wording the Codex picker already uses. */
+export const PI_THINKING_LEVEL_LABELS: Record<PiThinkingLevel, string> = {
+  off: "Off",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+};
+
+/** Level blurbs, matching the ones Pi shows in its own settings menu. */
+export const PI_THINKING_LEVEL_DESCRIPTIONS: Record<PiThinkingLevel, string> = {
+  off: "No reasoning",
+  minimal: "Very brief reasoning (~1k tokens)",
+  low: "Light reasoning (~2k tokens)",
+  medium: "Moderate reasoning (~8k tokens)",
+  high: "Deep reasoning (~16k tokens)",
+  xhigh: "Extra-high reasoning (~32k tokens)",
+  max: "Maximum reasoning",
+};
+
+const PI_THINKING_LEVEL_SET: ReadonlySet<string> = new Set(PI_THINKING_LEVELS);
+
+/** Narrow an untrusted wire value to a known level. */
+export function parsePiThinkingLevel(value: unknown): PiThinkingLevel | undefined {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return PI_THINKING_LEVEL_SET.has(trimmed) ? (trimmed as PiThinkingLevel) : undefined;
+}
+
+/**
+ * The levels a catalog entry supports, mirroring Pi's
+ * `getSupportedThinkingLevels`: a model without `reasoning` has only `off`, a
+ * `thinkingLevelMap` entry pinned to `null` removes that level, and
+ * `xhigh`/`max` appear only where the model maps them explicitly.
+ *
+ * Deriving this from the catalog keeps the probe to one round-trip. Pi's
+ * `get_available_thinking_levels` answers only for the *current* model, so
+ * reading it per model would cost a `set_model` each.
+ */
+export function piThinkingLevelsFromModelRecord(
+  value: unknown,
+): ReadonlyArray<PiThinkingLevel> {
+  if (!isRecord(value) || value.reasoning !== true) {
+    return ["off"];
+  }
+  const levelMap = isRecord(value.thinkingLevelMap) ? value.thinkingLevelMap : undefined;
+  return PI_THINKING_LEVELS.filter((level) => {
+    const mapped = levelMap?.[level];
+    if (mapped === null) {
+      return false;
+    }
+    return level === "xhigh" || level === "max" ? mapped !== undefined : true;
+  });
+}
+
+/**
+ * Pick the level Pi would settle on for a model that does not support the
+ * requested one, mirroring Pi's `clampThinkingLevel`: bias upward first, then
+ * downward. Keeps our picker's default honest instead of showing a value Pi
+ * would silently replace.
+ */
+export function clampPiThinkingLevel(
+  level: PiThinkingLevel,
+  availableLevels: ReadonlyArray<PiThinkingLevel>,
+): PiThinkingLevel | undefined {
+  if (availableLevels.length === 0) {
+    return undefined;
+  }
+  if (availableLevels.includes(level)) {
+    return level;
+  }
+  const requestedIndex = PI_THINKING_LEVELS.indexOf(level);
+  for (let index = requestedIndex; index < PI_THINKING_LEVELS.length; index += 1) {
+    const candidate = PI_THINKING_LEVELS[index];
+    if (candidate && availableLevels.includes(candidate)) {
+      return candidate;
+    }
+  }
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const candidate = PI_THINKING_LEVELS[index];
+    if (candidate && availableLevels.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return availableLevels[0];
+}
+
 export interface PiCatalogModel {
   readonly slug: string;
   readonly name: string;
+  /** Levels this model supports, weakest first; `["off"]` when it cannot reason. */
+  readonly thinkingLevels: ReadonlyArray<PiThinkingLevel>;
 }
 
 /**
  * Parse the `get_available_models` response payload. Accepts either
- * `{ models: [...] }` or a bare array; entries carry `provider` plus
- * `id`/`modelId` and an optional display `name`.
+ * `{ models: [...] }` or a bare array; entries are full Pi `Model` objects,
+ * carrying `provider` plus `id`/`modelId`, an optional display `name`, and the
+ * `reasoning`/`thinkingLevelMap` pair the thinking levels derive from.
  */
 export function parsePiAvailableModels(data: unknown): ReadonlyArray<PiCatalogModel> {
   const entries = isRecord(data) && Array.isArray(data.models) ? data.models : data;
@@ -211,7 +326,7 @@ export function parsePiAvailableModels(data: unknown): ReadonlyArray<PiCatalogMo
     }
     seen.add(slug);
     const name = (isRecord(entry) ? stringField(entry, "name") : undefined) ?? slug;
-    models.push({ slug, name });
+    models.push({ slug, name, thinkingLevels: piThinkingLevelsFromModelRecord(entry) });
   }
   return models;
 }
@@ -260,6 +375,8 @@ export interface PiSessionState {
   readonly sessionId: string | undefined;
   readonly sessionFile: string | undefined;
   readonly modelSlug: string | undefined;
+  /** Level Pi is currently set to, resolved from its own settings. */
+  readonly thinkingLevel: PiThinkingLevel | undefined;
   readonly isStreaming: boolean;
   readonly autoCompactionEnabled: boolean;
 }
@@ -271,6 +388,7 @@ export function parsePiSessionState(data: unknown): PiSessionState {
       sessionId: undefined,
       sessionFile: undefined,
       modelSlug: undefined,
+      thinkingLevel: undefined,
       isStreaming: false,
       autoCompactionEnabled: false,
     };
@@ -279,6 +397,7 @@ export function parsePiSessionState(data: unknown): PiSessionState {
     sessionId: stringField(data, "sessionId"),
     sessionFile: stringField(data, "sessionFile"),
     modelSlug: piModelSlugFromRecord(data.model),
+    thinkingLevel: parsePiThinkingLevel(data.thinkingLevel),
     isStreaming: data.isStreaming === true,
     autoCompactionEnabled: data.autoCompactionEnabled === true,
   };

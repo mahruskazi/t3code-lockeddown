@@ -21,6 +21,7 @@
 import {
   ApprovalRequestId,
   EventId,
+  type ModelSelection,
   type PiSettings,
   type ProviderApprovalDecision,
   type ProviderRuntimeEvent,
@@ -61,6 +62,7 @@ import {
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { deriveToolActivityPresentation } from "@t3tools/shared/toolActivity";
 
 import {
@@ -83,6 +85,8 @@ import {
   parseT3PiApprovalTitle,
   parseT3PiSubagentEvent,
   parseT3PiUserInputTitle,
+  parsePiThinkingLevel,
+  PI_THINKING_LEVEL_OPTION_ID,
   splitPiModelSlug,
   T3_PI_APPROVAL_OPTIONS,
   T3_PI_RUNTIME_MODE_ENV,
@@ -91,6 +95,7 @@ import {
   usageSnapshotFromPiSessionStats,
   type PiExtensionUiRequest,
   type PiRpcEvent,
+  type PiThinkingLevel,
   type T3PiSubagentEvent,
 } from "../piRpc/PiRpcModel.ts";
 import { makePiRpcProcess, type PiRpcProcess } from "../piRpc/PiRpcProcess.ts";
@@ -193,8 +198,22 @@ interface PiSessionContext {
   lastUsage: ThreadTokenUsageSnapshot | undefined;
   readonly compactsAutomatically: boolean;
   currentModelSlug: string | undefined;
+  currentThinkingLevel: PiThinkingLevel | undefined;
   sessionFile: string | undefined;
   stopped: boolean;
+}
+
+/**
+ * The thinking level a model selection asks for, if any. Unknown values are
+ * dropped rather than forwarded: Pi would clamp them anyway, and a bad level
+ * should not cost a round-trip.
+ */
+function requestedPiThinkingLevel(
+  modelSelection: ModelSelection | undefined,
+): PiThinkingLevel | undefined {
+  return parsePiThinkingLevel(
+    getModelSelectionStringOptionValue(modelSelection, PI_THINKING_LEVEL_OPTION_ID),
+  );
 }
 
 function settlePendingApprovalsAsCancelled(
@@ -1135,6 +1154,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             );
 
           let boundModelSlug = state.modelSlug;
+          let modelWasSwitched = false;
           const requestedModel = splitPiModelSlug(piModelSelection?.model);
           if (requestedModel && piModelSelection?.model !== state.modelSlug) {
             yield* rpc
@@ -1155,6 +1175,32 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 ),
               );
             boundModelSlug = piModelSelection?.model;
+            modelWasSwitched = true;
+          }
+
+          // Pi recomputes the thinking level on every `set_model` (per-model
+          // override, else its own default), so this has to follow the switch
+          // and has to re-send even an unchanged level once the model moved.
+          let boundThinkingLevel = state.thinkingLevel;
+          const requestedThinkingLevel = requestedPiThinkingLevel(piModelSelection);
+          if (
+            requestedThinkingLevel !== undefined &&
+            (modelWasSwitched || requestedThinkingLevel !== state.thinkingLevel)
+          ) {
+            yield* rpc
+              .request({ type: "set_thinking_level", level: requestedThinkingLevel })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "set_thinking_level",
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
+              );
+            boundThinkingLevel = requestedThinkingLevel;
           }
 
           const now = yield* nowIso;
@@ -1198,6 +1244,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             lastUsage: undefined,
             compactsAutomatically: state.autoCompactionEnabled,
             currentModelSlug: boundModelSlug,
+            currentThinkingLevel: boundThinkingLevel,
             sessionFile: state.sessionFile,
             stopped: false,
           };
@@ -1300,6 +1347,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 ? input.modelSelection
                 : undefined;
             const requestedSlug = turnModelSelection?.model?.trim() || undefined;
+            let modelWasSwitched = false;
             if (requestedSlug !== undefined && requestedSlug !== ctx.currentModelSlug) {
               const split = splitPiModelSlug(requestedSlug);
               if (split) {
@@ -1317,7 +1365,30 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                     ),
                   );
                 ctx.currentModelSlug = requestedSlug;
+                modelWasSwitched = true;
               }
+            }
+
+            // Thinking level, after the model switch that would have reset it.
+            const requestedLevel = requestedPiThinkingLevel(turnModelSelection);
+            if (
+              requestedLevel !== undefined &&
+              (modelWasSwitched || requestedLevel !== ctx.currentThinkingLevel)
+            ) {
+              yield* ctx.rpc
+                .request({ type: "set_thinking_level", level: requestedLevel })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapterRequestError({
+                        provider: PROVIDER,
+                        method: "set_thinking_level",
+                        detail: cause.message,
+                        cause,
+                      }),
+                  ),
+                );
+              ctx.currentThinkingLevel = requestedLevel;
             }
 
             const done = ctx.turnDone.get(turnId) ?? (yield* Deferred.make<TurnSettlement>());

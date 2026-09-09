@@ -43,7 +43,17 @@ import {
   enrichProviderSnapshotWithVersionAdvisory,
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
-import { parsePiAvailableModels, parsePiAvailableSkills } from "../piRpc/PiRpcModel.ts";
+import {
+  clampPiThinkingLevel,
+  parsePiAvailableModels,
+  parsePiAvailableSkills,
+  parsePiSessionState,
+  PI_THINKING_LEVEL_DESCRIPTIONS,
+  PI_THINKING_LEVEL_LABELS,
+  PI_THINKING_LEVEL_OPTION_ID,
+  type PiCatalogModel,
+  type PiThinkingLevel,
+} from "../piRpc/PiRpcModel.ts";
 import { makePiRpcProcess } from "../piRpc/PiRpcProcess.ts";
 
 const PI_PRESENTATION = {
@@ -57,23 +67,96 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
 
+/**
+ * Fallback level set for models we could not inspect: everything Pi offers on
+ * a reasoning model that declares no `thinkingLevelMap`. `xhigh`/`max` stay
+ * out, matching Pi's rule that a model must map them explicitly.
+ *
+ * Used for the built-in entry and for custom slugs the catalog did not cover.
+ * Pi clamps anything it cannot honour, so an over-offered level degrades to
+ * the nearest supported one rather than failing the turn.
+ */
+const DEFAULT_PI_THINKING_LEVELS: ReadonlyArray<PiThinkingLevel> = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+];
+
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
 const PI_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+
+/**
+ * Build the thinking-level picker for one model. A model with a single level
+ * (`["off"]` — Pi's answer for anything without reasoning support) gets no
+ * descriptor at all, so the UI shows a control only where there is a real
+ * choice to make.
+ *
+ * `sessionDefaultLevel` is Pi's own current level, read from `get_state`, so
+ * the picker opens on whatever the operator's Pi settings already default to
+ * (`defaultThinkingLevel`) instead of a value we invented.
+ */
+export function buildPiModelCapabilities(
+  thinkingLevels: ReadonlyArray<PiThinkingLevel>,
+  sessionDefaultLevel?: PiThinkingLevel | undefined,
+): ModelCapabilities {
+  if (thinkingLevels.length < 2) {
+    return EMPTY_CAPABILITIES;
+  }
+  const defaultLevel = sessionDefaultLevel
+    ? clampPiThinkingLevel(sessionDefaultLevel, thinkingLevels)
+    : undefined;
+  return createModelCapabilities({
+    optionDescriptors: [
+      {
+        id: PI_THINKING_LEVEL_OPTION_ID,
+        label: "Thinking",
+        type: "select",
+        options: thinkingLevels.map((level) => ({
+          id: level,
+          label: PI_THINKING_LEVEL_LABELS[level],
+          description: PI_THINKING_LEVEL_DESCRIPTIONS[level],
+          ...(level === defaultLevel ? { isDefault: true } : {}),
+        })),
+        ...(defaultLevel ? { currentValue: defaultLevel } : {}),
+      },
+    ],
+  });
+}
 
 const PI_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
   {
     slug: "anthropic/claude-sonnet-5",
     name: "Claude Sonnet 5",
     isCustom: false,
-    capabilities: EMPTY_CAPABILITIES,
+    capabilities: buildPiModelCapabilities(DEFAULT_PI_THINKING_LEVELS),
   },
 ];
 
 export function piModelsFromSettings(
   customModels: ReadonlyArray<string> | undefined,
   builtInModels: ReadonlyArray<ServerProviderModel> = PI_BUILT_IN_MODELS,
+  sessionDefaultLevel?: PiThinkingLevel | undefined,
 ): ReadonlyArray<ServerProviderModel> {
-  return providerModelsFromSettings(builtInModels, customModels ?? [], EMPTY_CAPABILITIES);
+  return providerModelsFromSettings(
+    builtInModels,
+    customModels ?? [],
+    buildPiModelCapabilities(DEFAULT_PI_THINKING_LEVELS, sessionDefaultLevel),
+  );
+}
+
+/** Map one discovered catalog entry into a snapshot model. */
+export function piServerProviderModel(
+  model: PiCatalogModel,
+  sessionDefaultLevel?: PiThinkingLevel | undefined,
+): ServerProviderModel {
+  return {
+    slug: model.slug,
+    name: model.name,
+    isCustom: false,
+    capabilities: buildPiModelCapabilities(model.thinkingLevels, sessionDefaultLevel),
+  };
 }
 
 export function buildInitialPiProviderSnapshot(
@@ -141,7 +224,7 @@ const discoverPiCatalog = (piSettings: PiSettings, environment: NodeJS.ProcessEn
       cwd: process.cwd(),
       env: environment,
     });
-    const [modelsResponse, skills] = yield* Effect.all(
+    const [modelsResponse, skills, sessionDefaultLevel] = yield* Effect.all(
       [
         rpc.request(
           { type: "get_available_models" },
@@ -160,18 +243,29 @@ const discoverPiCatalog = (piSettings: PiSettings, environment: NodeJS.ProcessEn
               }).pipe(Effect.as<ReadonlyArray<ServerProviderSkill>>([])),
             ),
           ),
+        // Pi's own current level, so the picker opens on the operator's
+        // `defaultThinkingLevel` rather than a value we chose. Optional: a
+        // missing default just leaves the descriptor without a currentValue.
+        rpc
+          .request(
+            { type: "get_state" },
+            { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
+          )
+          .pipe(
+            Effect.map((response) => parsePiSessionState(response.data).thinkingLevel),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Pi thinking-level default discovery failed", {
+                errorTag: causeErrorTag(cause),
+              }).pipe(Effect.as<PiThinkingLevel | undefined>(undefined)),
+            ),
+          ),
       ],
       { concurrency: "unbounded" },
     );
-    const models = parsePiAvailableModels(modelsResponse.data).map(
-      (model): ServerProviderModel => ({
-        slug: model.slug,
-        name: model.name,
-        isCustom: false,
-        capabilities: EMPTY_CAPABILITIES,
-      }),
+    const models = parsePiAvailableModels(modelsResponse.data).map((model) =>
+      piServerProviderModel(model, sessionDefaultLevel),
     );
-    return { models, skills } as const;
+    return { models, skills, sessionDefaultLevel } as const;
   }).pipe(Effect.scoped);
 
 export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function* (
@@ -305,10 +399,10 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const { models: discoveredModels, skills } = discoveryExit.value.value;
+  const { models: discoveredModels, skills, sessionDefaultLevel } = discoveryExit.value.value;
   const models =
     discoveredModels.length > 0
-      ? piModelsFromSettings(piSettings.customModels, discoveredModels)
+      ? piModelsFromSettings(piSettings.customModels, discoveredModels, sessionDefaultLevel)
       : fallbackModels;
 
   return buildServerProvider({

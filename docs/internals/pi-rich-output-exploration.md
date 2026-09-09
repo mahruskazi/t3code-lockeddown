@@ -153,8 +153,11 @@ jobs; the subagent bridge's stop semantics discussion applies unchanged.
 
 Not "output", but repeatedly adjacent while reading this code:
 
-- `set_thinking_level` is unexposed (fork doc limitation #4); pi-config sets
-  `defaultThinkingLevel: "high"` globally as a workaround.
+- ~~`set_thinking_level` is unexposed; pi-config sets `defaultThinkingLevel:
+  "high"` globally as a workaround.~~ Done: the snapshot publishes a
+  per-model `thinkingLevel` picker and the adapter applies it after
+  `set_model`. pi-config's global default still supplies the picker's initial
+  value, read from `get_state`.
 - Provider-side rollback via Pi's `fork`/`get_entries` (limitation #1).
 
 ## Suggested order
