@@ -1,6 +1,6 @@
 # T3 Code
 
-T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode) and serves web, desktop, and mobile clients.
+T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs and agents (Codex, Claude Code, Cursor, Grok, OpenCode, Antigravity) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
 
@@ -70,11 +70,11 @@ The most common defect in this repo is a change that works on the path you teste
 
 - **Entry points.** A behavior reachable from the chat view is usually also reachable from Settings, the command palette, and a keybinding. Fixing one is not fixing the feature.
 - **Clients.** Web, desktop (wraps web, adds Electron shell/IPC), and mobile (React Native, separate navigation). Shared logic lives in `packages/client-runtime`
-- **Providers.** Codex, Claude, Cursor, Grok, and OpenCode each have an adapter. Provider-shaped features need a decision per adapter, even if the decision is "not supported here".
+- **Providers.** Codex, Claude, Cursor, Grok, OpenCode, and Antigravity each have an adapter. Provider-shaped features need a decision per adapter, even if the decision is "not supported here".
 - **Contracts.** Anything crossing the wire is typed in `packages/contracts`. Change the schema and the server, web, mobile, and desktop all follow.
 - **Reverse states.** If you added a way in, add the way out and the way to see it. Snooze needs unsnooze. Close needs reopen. A one-way door is a bug.
 - **Connection modes.** Local, remote/relay, and tunnel behave differently. Multi-device and multi-environment cases are real.
-- **Docs.** `docs/` splits by audience. Behavior changes that a user would notice belong in `docs/user/` (shipped-product voice, no repo tooling or source paths); architecture and contributor changes in `docs/internals/`; runbooks in `docs/operations/`; new vocabulary in `docs/internals/glossary.md`.
+- **Docs.** Check whether the change makes existing guidance inaccurate. Apply the [documentation rules](#documentation) before adding anything.
 
 ## Dev servers
 
@@ -110,7 +110,7 @@ Every outbound path this fork has, and what it may carry. A path that is not on 
 
 | Path                                                              | Carries code or prompts                                              | Status                                                                                                                     |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode, Pi)    | Yes — this is the authorized harness                                 | The product                                                                                                                |
+| Provider harnesses (Codex, Claude Code, Cursor, Grok, OpenCode, Pi) | Yes — this is the authorized harness                                 | The product. Claude runs in-process via `@anthropic-ai/claude-agent-sdk`, not a spawned CLI. See the note below.            |
 | Codex `/feedback` upload (OpenAI, through the Codex CLI)          | Yes — the whole thread plus Codex's own logs                         | Opt-in per invocation; the user types `/feedback` in a Codex thread. See the note below.                                   |
 | Source-control hosts (GitHub, GitLab, Bitbucket, Azure DevOps)    | Yes — but to the repo's own remote, under the operator's credentials | Authorized                                                                                                                 |
 | T3 Connect relay (`app.t3.codes` plus a cloudflared tunnel)       | Yes — the entire session                                             | Opt-in per environment via `t3 connect`, never on by default. See the note below.                                          |
@@ -124,11 +124,37 @@ Every outbound path this fork has, and what it may carry. A path that is not on 
 | OTLP traces and metrics export                                    | No — span metadata, but includes workspace and worktree paths        | Operator-configured, off by default. See the note below (`apps/server/src/observability/Layers/Observability.ts`)          |
 | Hosted app auth (`app.t3.codes`, Clerk)                           | No — account identity                                                | Only on the hosted-web and relay paths                                                                                     |
 
+**The Claude harness is a library, not a subprocess.** Upstream moved the Claude provider from a
+spawned `claude` CLI to `@anthropic-ai/claude-agent-sdk` running inside the server process
+(`apps/server/src/provider/Layers/ClaudeAdapter.ts`). The destination is unchanged — Anthropic, under
+the operator's own subscription, carrying the turn — so it stays the authorized path. What changed is
+the shape: the server now makes those HTTPS calls itself rather than handing them to a separate
+process, so the harness boundary is a dependency version rather than a process boundary. The SDK's
+bundled platform binaries are removed by `pnpm-workspace.yaml` overrides and the user's own Claude
+executable is always supplied, so no vendored binary ships. Treat an SDK bump as provider-adapter
+surface in the audit: read the diff for widened payloads, not just for a version number.
+
 **Codex `/feedback` is a deliberate upload, not a turn.** Sending `/feedback` in a Codex thread calls the Codex app-server's `feedback/upload`, which posts that thread's transcript to OpenAI with `includeLogs: true` and returns an id to quote at OpenAI support. It rides the authorized harness and goes to the vendor whose CLI already sees every turn in that thread, which is why it is not a fifth invariant — but the logs are wider than a turn, and nothing about the payload is reviewable from here. Treat invoking it on a proprietary thread the way you would treat pasting that thread into a vendor support ticket, because that is what it is. Nothing sends it automatically: no code path reaches `uploadFeedback` without the user typing the command.
 
 **T3 Connect is the open one.** This fork has not disabled it, and it is the one available path that would carry everything — code, prompts, diffs, terminal output — through a third party. It takes a deliberate `t3 connect` to start, so nothing leaks by accident, but enabling it on a machine holding proprietary code is an authorization decision, not a convenience. Local network and Tailscale reach the same clients without it. If we ever decide the relay is out of bounds here, that becomes a fifth invariant with a choke point and a tripwire, like the four below.
 
 **OTLP export is the other operator switch.** Setting `otlpTracesUrl` or `otlpMetricsUrl` makes the server forward its spans to that URL every ten seconds, alongside the local `server.trace.ndjson` it always writes. The spans carry operation names, provider kind, model names, thread and turn ids, and attachment counts — not prompt text, file contents, diffs, or terminal output. They do carry `terminal.cwd`, `checkpoint.cwd`, and `claude.query.cwd`, so a collector learns the paths of the repositories worked on here, which is enough to identify projects and clients. Nothing filters span attributes; the only redaction in the pipeline covers HTTP header names. Both settings are empty by default and are set from `settings.json` or `T3CODE_OTLP_*`, never from the Settings UI, which only reports whether export is on. Pointing them at a collector on a machine holding proprietary code is an authorization decision, the same shape as T3 Connect.
+
+**The desktop app can now read your browser's cookies.** Upstream added a browser-import feature
+(`apps/desktop/src/preview/BrowserImport/`) that decrypts Chromium, Firefox and Safari cookie
+databases and writes them into the in-app preview browser's Electron partition. It reaches the OS
+credential store through `@napi-rs/keyring` and, on Linux, a small libsecret helper we build from
+source (`native/browser-secret/main.c`). Nothing leaves the machine: the cookies move from one local
+store to another, and macOS still shows its keychain prompt. It is on this page because the preview
+browser is remotely drivable — once real session cookies live in it, anyone who can drive this
+environment can reach the sites those cookies authenticate. That is an access decision, the same
+shape as T3 Connect and OTLP, not a leak.
+
+**Upstream's `cursor-hygiene-webhook` workflow is not carried here.** It POSTs the full GitHub event
+payload — PR titles and bodies, issue and discussion text — to a Cursor webhook on every push, PR,
+issue and discussion. It no-ops without its two secrets, so it was inert, but it forwards this
+repository's activity to a third party the moment anyone sets them. Deleted on sync; delete it again
+if a future merge brings it back.
 
 ### The invariants
 
@@ -219,11 +245,22 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 - One concern per PR. If the description says "also", split it.
 - When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
 
+## Documentation
+
+Most code changes do not need an internal documentation change. Agents can read the code.
+
+- `docs/internals/` is for architectural decisions and their reasons, constraints that span components, and implementation traps that are hard to discover from the source. Before adding a paragraph, ask what a maintainer would get wrong without it. If reading the relevant code answers the question, leave it out.
+- Do not document every feature, enumerate fields or methods, narrate control flow, maintain file catalogs, or append PR summaries. Types, tests, and code already record the implementation. The glossary defines shared vocabulary; it is not a feature index.
+- Keep a local implementation explanation in a nearby code comment. Use an internal doc when the reasoning crosses boundaries or needs context the code cannot carry well. Link to the relevant source instead of copying it.
+- When a documented decision or constraint changes, rewrite or remove the affected text. Do not append another account of the new behavior. A new internal page needs a distinct, durable reason to exist.
+- `docs/user/` helps users accomplish tasks. Give each major feature a concise section explaining what it does, how to start, and anything unintuitive. A settings path is useful; descriptions of visible buttons, icons, layouts, animations, or every UI state are not. Before adding text, ask what task or decision it helps the user with.
+- Keep user docs in the shipped product's voice, without implementation details or contributor tooling. Update the relevant feature section when how to use it changes. A UI tweak does not need a documentation entry, and a new control does not need its own page.
+- `docs/operations/` holds maintainer setup, release, and debugging procedures. Keep instructions for operating an installed T3 Code server in the user guides.
+
 ## Plans and work artifacts
 
 - Do not commit implementation plans, research notes, or agent scratch files. Keep temporary working material outside the worktree. `.plans/` is gitignored only as a safety net for legacy tooling.
 - Track active maintainer work in the GitHub issue or project item that owns it. External proposals follow `CONTRIBUTING.md` and belong in Ideas discussions.
-- Put durable architecture, constraints, and decisions in `docs/internals/`. Update those docs when the product changes so agents find current facts instead of abandoned intentions.
 - A merged PR is the implementation record. Close or update its tracking item when the work lands; do not preserve a second checklist in the repository.
 
 ## How it works
