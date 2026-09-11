@@ -103,6 +103,18 @@ DMGs default to the host architecture. Use `--arch` to choose another target and
 to retain packaging files for inspection. Run `vp run dist:desktop:artifact --help` for other
 options.
 
+To build the current checkout and install it into `/Applications`, run:
+
+```sh
+vp run install:desktop:mac
+```
+
+Quit T3 Code before the install step. Existing installs require confirmation; pass `--yes` for
+unattended replacement, `--skip-deps` to reuse installed dependencies, or
+`--destination ~/Applications` for a user-local install. The script assigns a `-pr.local` preview
+version so the source-built app has no release update feed and cannot replace the fork with an
+upstream release.
+
 ### Linux AppImage prerequisites
 
 Build on Linux because the browser-secret helper links against the host's libsecret. Install
