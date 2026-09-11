@@ -5,6 +5,9 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   assistantDeltaFromMessageUpdate,
+  clampPiThinkingLevel,
+  parsePiThinkingLevel,
+  piThinkingLevelsFromModelRecord,
   buildPiToolCallData,
   canonicalRequestTypeForPiTool,
   classifyPiRpcLine,
@@ -95,6 +98,67 @@ describe("model slugs", () => {
     assert.isUndefined(piModelSlugFromRecord("nope"));
   });
 
+  it("derives the thinking levels a model supports from its catalog entry", () => {
+    // A model without `reasoning` cannot think at all.
+    assert.deepStrictEqual(piThinkingLevelsFromModelRecord({ id: "plain" }), ["off"]);
+    assert.deepStrictEqual(piThinkingLevelsFromModelRecord({ id: "plain", reasoning: false }), [
+      "off",
+    ]);
+
+    // A reasoning model with no map gets the base scale; xhigh and max need
+    // an explicit mapping, matching Pi's own rule.
+    assert.deepStrictEqual(piThinkingLevelsFromModelRecord({ id: "sonnet", reasoning: true }), [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+    ]);
+    assert.deepStrictEqual(
+      piThinkingLevelsFromModelRecord({
+        id: "gpt-5.6",
+        reasoning: true,
+        thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+      }),
+      ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    );
+
+    // A level pinned to null is unsupported and drops out.
+    assert.deepStrictEqual(
+      piThinkingLevelsFromModelRecord({
+        id: "deepseek",
+        reasoning: true,
+        thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh" },
+      }),
+      ["minimal", "low", "medium", "high", "xhigh"],
+    );
+
+    assert.deepStrictEqual(piThinkingLevelsFromModelRecord("nope"), ["off"]);
+  });
+
+  it("clamps a requested thinking level the way Pi would", () => {
+    const available = ["off", "low", "high"] as const;
+
+    // Supported levels pass through untouched.
+    assert.strictEqual(clampPiThinkingLevel("low", available), "low");
+
+    // Unsupported levels bias upward first...
+    assert.strictEqual(clampPiThinkingLevel("minimal", available), "low");
+    assert.strictEqual(clampPiThinkingLevel("medium", available), "high");
+
+    // ...then downward when nothing stronger exists.
+    assert.strictEqual(clampPiThinkingLevel("max", available), "high");
+
+    assert.isUndefined(clampPiThinkingLevel("high", []));
+  });
+
+  it("narrows thinking levels off the wire", () => {
+    assert.strictEqual(parsePiThinkingLevel("high"), "high");
+    assert.strictEqual(parsePiThinkingLevel("  xhigh  "), "xhigh");
+    assert.isUndefined(parsePiThinkingLevel("colossal"));
+    assert.isUndefined(parsePiThinkingLevel(3));
+  });
+
   it("parses available-models payloads in both shapes", () => {
     const wrapped = parsePiAvailableModels({
       models: [
@@ -105,12 +169,18 @@ describe("model slugs", () => {
       ],
     });
     assert.deepStrictEqual(wrapped, [
-      { slug: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5" },
-      { slug: "openai/gpt-5", name: "openai/gpt-5" },
+      {
+        slug: "anthropic/claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        thinkingLevels: ["off"],
+      },
+      { slug: "openai/gpt-5", name: "openai/gpt-5", thinkingLevels: ["off"] },
     ]);
 
     const bare = parsePiAvailableModels([{ provider: "google", id: "gemini" }]);
-    assert.deepStrictEqual(bare, [{ slug: "google/gemini", name: "google/gemini" }]);
+    assert.deepStrictEqual(bare, [
+      { slug: "google/gemini", name: "google/gemini", thinkingLevels: ["off"] },
+    ]);
 
     assert.deepStrictEqual(parsePiAvailableModels("nope"), []);
   });
@@ -164,17 +234,26 @@ describe("session state and resume", () => {
       model: { provider: "anthropic", id: "claude-sonnet-5" },
       sessionId: "abc123",
       sessionFile: "/tmp/session.jsonl",
+      thinkingLevel: "high",
       isStreaming: true,
       autoCompactionEnabled: true,
     });
     assert.equal(state.sessionId, "abc123");
     assert.equal(state.sessionFile, "/tmp/session.jsonl");
     assert.equal(state.modelSlug, "anthropic/claude-sonnet-5");
+    assert.equal(state.thinkingLevel, "high");
     assert.isTrue(state.isStreaming);
     assert.isTrue(state.autoCompactionEnabled);
 
+    // An unknown level is dropped rather than passed through.
+    assert.isUndefined(
+      parsePiSessionState({ model: { provider: "a", id: "b" }, thinkingLevel: "colossal" })
+        .thinkingLevel,
+    );
+
     const empty = parsePiSessionState(undefined);
     assert.isUndefined(empty.sessionId);
+    assert.isUndefined(empty.thinkingLevel);
     assert.isFalse(empty.isStreaming);
     assert.isFalse(empty.autoCompactionEnabled);
   });

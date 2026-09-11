@@ -69,6 +69,53 @@ function waitForFileContent(filePath: string, attempts = 40): Effect.Effect<stri
   return readAttempt(attempts);
 }
 
+interface LoggedPiCommand {
+  readonly type: string;
+  readonly [key: string]: unknown;
+}
+
+/** Commands the mock has received so far, in order. */
+function readCommandLog(filePath: string): Effect.Effect<ReadonlyArray<LoggedPiCommand>> {
+  return Effect.tryPromise(() => NodeFSP.readFile(filePath, "utf8")).pipe(
+    Effect.orElseSucceed(() => ""),
+    Effect.map((raw) =>
+      raw
+        .split("\n")
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as LoggedPiCommand),
+    ),
+  );
+}
+
+/**
+ * Command log once `commandType` has landed. The adapter awaits each
+ * response, so a command it sent is already logged by the time the call
+ * returns; this only covers the case where the assertion runs first.
+ */
+function waitForCommandLog(
+  filePath: string,
+  commandType: string,
+  attempts = 40,
+): Effect.Effect<ReadonlyArray<LoggedPiCommand>> {
+  const readAttempt = (
+    remainingAttempts: number,
+  ): Effect.Effect<ReadonlyArray<LoggedPiCommand>> =>
+    Effect.gen(function* () {
+      const commands = yield* readCommandLog(filePath);
+      if (commands.some((entry) => entry.type === commandType)) {
+        return commands;
+      }
+      if (remainingAttempts <= 0) {
+        return yield* Effect.die(
+          new Error(`Timed out waiting for '${commandType}' in ${filePath}`),
+        );
+      }
+      yield* Effect.sleep("25 millis");
+      return yield* readAttempt(remainingAttempts - 1);
+    });
+  return readAttempt(attempts);
+}
+
 const piAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-pi-adapter-test-",
 }).pipe(Layer.provideMerge(NodeServices.layer));
@@ -603,6 +650,130 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
         schemaVersion: 1,
         sessionFile: "/tmp/resume-me.jsonl",
       });
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("sets the requested thinking level, after the set_model that resets it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-thinking-level-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-adapter-thinking-log-")),
+      );
+      const commandLogPath = NodePath.join(tempDir, "commands.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_COMMAND_LOG_PATH: commandLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      const turnCompleted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        event.type === "turn.completed"
+          ? Deferred.succeed(turnCompleted, undefined)
+          : Effect.void,
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("pi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "openai/gpt-5",
+          options: [{ id: "thinkingLevel", value: "xhigh" }],
+        },
+      });
+
+      // Pi recomputes the level whenever the model changes, so the order
+      // matters: a set_thinking_level before set_model would be discarded.
+      const afterStart = yield* waitForCommandLog(commandLogPath, "set_thinking_level");
+      assert.deepStrictEqual(
+        afterStart.filter((entry) => entry.type !== "get_state"),
+        [
+          { type: "set_model", provider: "openai", modelId: "gpt-5" },
+          { type: "set_thinking_level", level: "xhigh" },
+        ],
+      );
+
+      // Switching model on a turn re-sends the same level, because the
+      // switch reset it back to Pi's default.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hello pi",
+        attachments: [],
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "anthropic/claude-sonnet-5",
+          options: [{ id: "thinkingLevel", value: "xhigh" }],
+        },
+      });
+
+      yield* Deferred.await(turnCompleted);
+      yield* Fiber.interrupt(runtimeEventsFiber);
+
+      const afterTurn = yield* readCommandLog(commandLogPath);
+      assert.deepStrictEqual(
+        afterTurn
+          .filter((entry) => entry.type === "set_model" || entry.type === "set_thinking_level")
+          .slice(2),
+        [
+          { type: "set_model", provider: "anthropic", modelId: "claude-sonnet-5" },
+          { type: "set_thinking_level", level: "xhigh" },
+        ],
+      );
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("leaves Pi's own thinking level alone when the picker adds nothing", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-thinking-level-default-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-adapter-thinking-default-log-")),
+      );
+      const commandLogPath = NodePath.join(tempDir, "commands.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_COMMAND_LOG_PATH: commandLogPath }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      // No selection at all, and a model that is already current: nothing to
+      // apply, so Pi keeps whatever its own settings resolved to.
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("pi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "anthropic/claude-sonnet-5",
+        },
+      });
+
+      const afterStart = yield* waitForCommandLog(commandLogPath, "get_state");
+      assert.deepStrictEqual(
+        afterStart.map((entry) => entry.type),
+        ["get_state"],
+      );
+
+      // A selection Pi is already set to is not worth a round-trip either.
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("pi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "anthropic/claude-sonnet-5",
+          options: [{ id: "thinkingLevel", value: "medium" }],
+        },
+      });
+
+      const afterRestart = yield* readCommandLog(commandLogPath);
+      assert.isFalse(afterRestart.some((entry) => entry.type === "set_thinking_level"));
 
       yield* adapter.stopSession(threadId);
     }),

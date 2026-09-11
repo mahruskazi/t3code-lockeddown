@@ -31,6 +31,7 @@ git grep -n "fork:pi"   # every fork touch point, at any time
 | `apps/server/scripts/pi-mock-rpc-agent.ts`            | Mock `pi --mode rpc` for tests                                                                                                                                                           |
 | `apps/server/src/provider/piRpc/PiRpcModel.test.ts`   | Protocol model unit tests                                                                                                                                                                |
 | `apps/server/src/provider/Layers/PiAdapter.test.ts`   | Adapter integration tests against the mock agent                                                                                                                                         |
+| `apps/server/src/provider/Layers/PiProvider.test.ts`  | Snapshot capability tests (thinking-level pickers)                                                                                                                                       |
 | `apps/web/src/components/PiIcon.tsx`                  | π provider icon (kept out of `Icons.tsx` deliberately)                                                                                                                                   |
 | `docs/internals/fork-pi-provider.md`                  | This document                                                                                                                                                                            |
 
@@ -74,7 +75,7 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
    follow whatever the Grok driver now does — PiDriver/PiProvider/PiTextGeneration
    are deliberately shaped 1:1 after their Grok counterparts.
 4. Re-run: `vp run --filter t3 typecheck` and
-   `vp test run src/provider/piRpc src/provider/Layers/PiAdapter.test.ts src/provider/Layers/ProviderRegistry.test.ts`
+   `vp test run src/provider/piRpc src/provider/Layers/PiAdapter.test.ts src/provider/Layers/PiProvider.test.ts src/provider/Layers/ProviderRegistry.test.ts`
    (from `apps/server`).
 
 ## How the integration works
@@ -121,6 +122,21 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   marker transports stay invisible.
 - **Models.** Pi models are `provider/modelId` slugs. The probe discovers the
   catalog via `get_available_models`; `set_model` switches in-session.
+- **Thinking levels.** Pi's scale is `off, minimal, low, medium, high, xhigh,
+  max`, and it is per model: `get_available_models` returns full Pi `Model`
+  objects, so the levels come off each entry's `reasoning` flag and
+  `thinkingLevelMap` (a level mapped to `null` is unsupported; `xhigh`/`max`
+  need an explicit mapping). That mirrors Pi's own `getSupportedThinkingLevels`
+  and keeps discovery to one round-trip — Pi's
+  `get_available_thinking_levels` answers only for the *current* model, so
+  reading it per model would cost a `set_model` each. A model with one level
+  (`["off"]`, Pi's answer for anything without reasoning support) publishes no
+  descriptor, so the picker appears only where there is a choice. The probe
+  also reads `get_state` for Pi's own current level and uses it as the
+  descriptor's default, which is how the operator's `defaultThinkingLevel`
+  shows through. The adapter sends `set_thinking_level` **after** `set_model`,
+  never before: Pi recomputes the level on every model switch, so a switch
+  re-sends even an unchanged level.
 - **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.
   Session files stay in Pi's own session dir, so `pi` in a terminal sees the
   same history.
@@ -162,4 +178,3 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
 - No MCP server passthrough to Pi.
 - Auth status reports `unknown` — Pi is bring-your-own-key via environment
   variables; the probe only verifies the CLI runs.
-- Pi's thinking-level control (`set_thinking_level`) is not surfaced.
