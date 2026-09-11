@@ -22,7 +22,7 @@ git grep -n "fork:pi"   # every fork touch point, at any time
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/server/src/provider/piRpc/PiRpcModel.ts`        | Pure protocol model: JSONL line classification, model slugs, session state, resume cursor, deltas, usage, tool events, agent settlement, extension-UI + `t3-approval:v1:` marker parsing |
 | `apps/server/src/provider/piRpc/PiRpcProcess.ts`      | `pi --mode rpc` child-process transport: spawn, LF-only JSONL pump, request/response correlation, single-consumer event queue, in-band exit signalling                                   |
-| `apps/server/src/provider/piRpc/PiExtensionSource.ts` | Embedded T3 approval-gating Pi extension + materializer (written under `<stateDir>/pi/`, loaded via `pi -e`)                                                                             |
+| `apps/server/src/provider/piRpc/PiExtensionSource.ts` | Embedded T3 runtime Pi extension (approval gating and targeted Anthropic refusal fallback) + materializer, written under `<stateDir>/pi/` and loaded via `pi -e`                         |
 | `apps/server/src/provider/Layers/PiAdapter.ts`        | Provider adapter: sessions, turns/steering, interrupts, approvals, user-input bridging, token usage, runtime events                                                                      |
 | `apps/server/src/provider/Layers/PiProvider.ts`       | Status probe (`pi --version`), dynamic model catalog (`get_available_models`), snapshot enrichment                                                                                       |
 | `apps/server/src/provider/Drivers/PiDriver.ts`        | Driver bundle (adapter + snapshot + text generation + extension materialization)                                                                                                         |
@@ -121,14 +121,23 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   duplicates collapsed, per-session cap). `info` notifications and `t3-`
   marker transports stay invisible.
 - **Models.** Pi models are `provider/modelId` slugs. The probe discovers the
-  catalog via `get_available_models`; `set_model` switches in-session.
-- **Thinking levels.** Pi's scale is `off, minimal, low, medium, high, xhigh,
-  max`, and it is per model: `get_available_models` returns full Pi `Model`
+  catalog via `get_available_models`; `set_model` switches in-session. Pi
+  normally supplies Anthropic's server-side refusal fallback metadata from its
+  model catalog. While Pi 0.84.4 omits that metadata for `claude-fable-5-1`,
+  the bundled extension adds the upstream beta header and ordered
+  `claude-opus-5` / `claude-opus-4-8` fallbacks to that model's original
+  request. It defers completely when Pi's model catalog gains native fallback
+  metadata and leaves an already-configured request untouched. Because
+  Anthropic handles the choice within the request, completed tool calls are
+  never replayed and Pi records/prices the model that actually answered.
+- **Thinking levels.** Pi's per-model scale is `off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, and `max`. `get_available_models` returns full Pi
+  `Model`
   objects, so the levels come off each entry's `reasoning` flag and
   `thinkingLevelMap` (a level mapped to `null` is unsupported; `xhigh`/`max`
   need an explicit mapping). That mirrors Pi's own `getSupportedThinkingLevels`
   and keeps discovery to one round-trip — Pi's
-  `get_available_thinking_levels` answers only for the *current* model, so
+  `get_available_thinking_levels` answers only for the _current_ model, so
   reading it per model would cost a `set_model` each. A model with one level
   (`["off"]`, Pi's answer for anything without reasoning support) publishes no
   descriptor, so the picker appears only where there is a choice. The probe
