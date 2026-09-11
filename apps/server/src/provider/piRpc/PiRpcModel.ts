@@ -25,7 +25,7 @@ import * as Schema from "effect/Schema";
 
 // ── Errors ────────────────────────────────────────────────────────────
 
-export class PiRpcSpawnError extends Schema.TaggedErrorClass<PiRpcSpawnError>()("PiRpcSpawnError", {
+export class PiRpcSpawnError extends Schema.TaggedError<PiRpcSpawnError>()("PiRpcSpawnError", {
   command: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),
@@ -35,7 +35,7 @@ export class PiRpcSpawnError extends Schema.TaggedErrorClass<PiRpcSpawnError>()(
   }
 }
 
-export class PiRpcTransportError extends Schema.TaggedErrorClass<PiRpcTransportError>()(
+export class PiRpcTransportError extends Schema.TaggedError<PiRpcTransportError>()(
   "PiRpcTransportError",
   {
     detail: Schema.String,
@@ -47,7 +47,7 @@ export class PiRpcTransportError extends Schema.TaggedErrorClass<PiRpcTransportE
   }
 }
 
-export class PiRpcRequestError extends Schema.TaggedErrorClass<PiRpcRequestError>()(
+export class PiRpcRequestError extends Schema.TaggedError<PiRpcRequestError>()(
   "PiRpcRequestError",
   {
     command: Schema.String,

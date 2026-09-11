@@ -162,9 +162,11 @@ describe("scanning Pi session files", () => {
     let parsed = 0;
     let landed = 0;
     for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
-      const records = await readTranscriptRecords(file.path, "pi");
-      expect(records).not.toBeNull();
-      for (const record of records ?? []) {
+      const result = await readTranscriptRecords(file.path, "pi");
+      expect(result).not.toBeNull();
+      // Upstream's reader returns newline-terminated records separately from an
+      // unterminated trailing segment; the scan counts both.
+      for (const record of [...(result?.records ?? []), ...(result?.tailRecords ?? [])]) {
         parsed += 1;
         if (aggregator.add(record)) landed += 1;
       }
