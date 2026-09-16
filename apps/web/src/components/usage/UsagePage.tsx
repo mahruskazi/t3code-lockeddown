@@ -35,7 +35,9 @@ import {
   formatPercent,
   formatTokens,
   formatUsd,
+  isUsageRange,
   makeWindow,
+  type UsageRange,
 } from "@t3tools/shared/usageFormat";
 import { Button } from "../ui/button";
 import {
@@ -62,11 +64,7 @@ import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
-import {
-  readUsagePagePreferences,
-  saveUsagePagePreferences,
-  type UsagePagePreferences,
-} from "./usagePagePreferences";
+import { readUsagePagePreferences, saveUsagePagePreferences } from "./usagePagePreferences";
 
 type UsageMetric = UsageChartMetric | "limits";
 const METRIC_OPTIONS = [
@@ -79,26 +77,19 @@ function isUsageMetric(value: string | null | undefined): value is UsageMetric {
   return METRIC_OPTIONS.some((option) => option.value === value);
 }
 
-const WINDOW_OPTIONS = [
-  { days: 1, label: "Past 24h" },
-  { days: 7, label: "7 days" },
-  { days: 30, label: "30 days" },
-  { days: 90, label: "90 days" },
-] as const;
-
-function isUsageWindowDays(value: number): value is UsagePagePreferences["windowDays"] {
-  return WINDOW_OPTIONS.some((option) => option.days === value);
-}
+const RANGE_OPTIONS = [
+  { value: "24h", label: "Past 24h" },
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+  { value: "90d", label: "90 days" },
+  { value: "mtd", label: "This month" },
+] as const satisfies readonly { value: UsageRange; label: string }[];
 
 export function UsagePage() {
   const [preferences, setPreferences] = useState(readUsagePagePreferences);
   const [windowSelection, setWindowSelection] = useState(() => ({
-    days: preferences.windowDays,
-    window: makeWindow(
-      preferences.windowDays,
-      undefined,
-      preferences.windowDays === 1 ? "hour" : "day",
-    ),
+    range: preferences.range,
+    window: makeWindow(preferences.range),
   }));
   const metric = preferences.metric;
   const showingLimits = metric === "limits";
@@ -107,8 +98,8 @@ export function UsagePage() {
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
-  const { days: windowDays, window } = windowSelection;
-  const isPast24Hours = windowDays === 1;
+  const { range, window } = windowSelection;
+  const isPast24Hours = range === "24h";
   const { merged, environments, selectedEnvironments, isPending, isPartial, refresh } = useUsage(
     window,
     selectedEnvironmentIds,
@@ -147,18 +138,15 @@ export function UsagePage() {
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
   const timeValueColumnWidth = `${60 / (activeProviders.length + 2)}%`;
 
-  const selectWindow = (days: number) => {
-    if (!isUsageWindowDays(days)) return;
-    const nextPreferences = { metric, windowDays: days };
+  const selectWindow = (nextRange: string | null | undefined) => {
+    if (!isUsageRange(nextRange)) return;
+    const nextPreferences = { metric, range: nextRange };
     setPreferences(nextPreferences);
     saveUsagePagePreferences(nextPreferences);
-    setWindowSelection({
-      days,
-      window: makeWindow(days, undefined, days === 1 ? "hour" : "day"),
-    });
+    setWindowSelection({ range: nextRange, window: makeWindow(nextRange) });
   };
   const selectMetric = (nextMetric: UsageMetric) => {
-    const nextPreferences = { metric: nextMetric, windowDays };
+    const nextPreferences = { metric: nextMetric, range };
     setPreferences(nextPreferences);
     saveUsagePagePreferences(nextPreferences);
   };
@@ -181,14 +169,14 @@ export function UsagePage() {
       });
       return;
     }
-    const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
+    const nextWindow = makeWindow(range);
     if (
       nextWindow.sinceDay !== window.sinceDay ||
       nextWindow.untilDay !== window.untilDay ||
       nextWindow.sinceTime !== window.sinceTime ||
       nextWindow.untilTime !== window.untilTime
     ) {
-      setWindowSelection({ days: windowDays, window: nextWindow });
+      setWindowSelection({ range, window: nextWindow });
     }
     refreshingRef.current = true;
     setIsRefreshing(true);
@@ -247,15 +235,12 @@ export function UsagePage() {
         <ToggleGroup
           aria-label="Usage period"
           variant="segmented"
-          value={[String(windowDays)]}
+          value={[range]}
           disabled={showingLimits}
-          onValueChange={(next) => {
-            const value = next[0];
-            if (value) selectWindow(Number(value));
-          }}
+          onValueChange={(next) => selectWindow(next[0])}
         >
-          {WINDOW_OPTIONS.map((option) => (
-            <Toggle key={option.days} value={String(option.days)}>
+          {RANGE_OPTIONS.map((option) => (
+            <Toggle key={option.value} value={option.value}>
               {option.label}
             </Toggle>
           ))}
@@ -296,11 +281,7 @@ export function UsagePage() {
             ))}
           </SelectPopup>
         </Select>
-        <Select
-          value={String(windowDays)}
-          disabled={showingLimits}
-          onValueChange={(value) => selectWindow(Number(value))}
-        >
+        <Select value={range} disabled={showingLimits} onValueChange={selectWindow}>
           <SelectTrigger
             aria-label="Usage period"
             size="compact"
@@ -308,12 +289,12 @@ export function UsagePage() {
             className="w-auto min-w-0"
           >
             <SelectValue>
-              {WINDOW_OPTIONS.find((option) => option.days === windowDays)?.label}
+              {RANGE_OPTIONS.find((option) => option.value === range)?.label}
             </SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
-            {WINDOW_OPTIONS.map((option) => (
-              <SelectItem key={option.days} value={String(option.days)}>
+            {RANGE_OPTIONS.map((option) => (
+              <SelectItem key={option.value} value={option.value}>
                 {option.label}
               </SelectItem>
             ))}

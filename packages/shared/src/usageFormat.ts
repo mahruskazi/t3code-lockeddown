@@ -4,7 +4,7 @@
  *
  * @module usageFormat
  */
-import { UsageDay, type UsageResolution, type UsageSummaryInput } from "@t3tools/contracts";
+import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
 
 const CURRENCY = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -171,14 +171,25 @@ export function formatRelativeHourShort(
 }
 
 /**
+ * The periods the usage page offers. Every one but `mtd` is a fixed number of
+ * days back from today; `mtd` runs from the 1st of the viewer's current month
+ * through today, so its length changes as the month goes on and it has to be
+ * resolved against `now` rather than stored as a day count.
+ */
+export const USAGE_RANGES = ["24h", "7d", "30d", "90d", "mtd"] as const;
+export type UsageRange = (typeof USAGE_RANGES)[number];
+
+const FIXED_RANGE_DAYS = { "24h": 1, "7d": 7, "30d": 30, "90d": 90 } as const;
+
+export function isUsageRange(value: unknown): value is UsageRange {
+  return USAGE_RANGES.some((range) => range === value);
+}
+
+/**
  * The window the page requests, expressed in the viewer's own time zone so days
  * line up with what they actually experienced.
  */
-export function makeWindow(
-  days: number,
-  now = new Date(),
-  resolution: UsageResolution = "day",
-): UsageSummaryInput {
+export function makeWindow(range: UsageRange, now = new Date()): UsageSummaryInput {
   let timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   let format: Intl.DateTimeFormat;
   try {
@@ -199,7 +210,7 @@ export function makeWindow(
     });
   }
   const untilDay = format.format(now);
-  if (resolution === "hour") {
+  if (range === "24h") {
     // Minute-aligned bounds keep labels readable while still representing an
     // exact rolling 24-hour duration. Fixed-duration buckets remain correct
     // across offset changes and daylight-saving transitions.
@@ -211,7 +222,7 @@ export function makeWindow(
       sinceDay: UsageDay.make(format.format(sinceTime)),
       untilDay: UsageDay.make(format.format(untilTime)),
       timeZone,
-      resolution,
+      resolution: "hour",
       sinceTime: sinceTime.toISOString(),
       untilTime: untilTime.toISOString(),
     };
@@ -222,11 +233,14 @@ export function makeWindow(
   const [year = 0, month = 1, dayOfMonth = 1] = untilDay
     .split("-")
     .map((part) => Number.parseInt(part, 10));
+  // Today's date in the month is exactly how many days of it have elapsed, so
+  // month to date is the day count that resets on the 1st.
+  const days = range === "mtd" ? dayOfMonth : FIXED_RANGE_DAYS[range];
   const start = new Date(Date.UTC(year, month - 1, dayOfMonth - (days - 1)));
   return {
     sinceDay: UsageDay.make(start.toISOString().slice(0, 10)),
     untilDay: UsageDay.make(untilDay),
     timeZone,
-    resolution,
+    resolution: "day",
   };
 }

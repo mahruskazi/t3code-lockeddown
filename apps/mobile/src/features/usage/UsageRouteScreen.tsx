@@ -15,6 +15,7 @@ import {
   formatTokens,
   formatUsd,
   makeWindow,
+  type UsageRange,
 } from "@t3tools/shared/usageFormat";
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, RefreshControl, ScrollView, View } from "react-native";
@@ -44,12 +45,17 @@ const TAB_OPTIONS = [
 
 // Labels are abbreviated to share a row with the metric toggle; screen
 // readers get the full phrase.
-const WINDOW_OPTIONS = [
-  { value: 1, label: "24h", accessibilityLabel: "Past 24 hours" },
-  { value: 7, label: "7d", accessibilityLabel: "Past 7 days" },
-  { value: 30, label: "30d", accessibilityLabel: "Past 30 days" },
-  { value: 90, label: "90d", accessibilityLabel: "Past 90 days" },
-] as const;
+const RANGE_OPTIONS = [
+  { value: "24h", label: "24h", accessibilityLabel: "Past 24 hours" },
+  { value: "7d", label: "7d", accessibilityLabel: "Past 7 days" },
+  { value: "30d", label: "30d", accessibilityLabel: "Past 30 days" },
+  { value: "90d", label: "90d", accessibilityLabel: "Past 90 days" },
+  { value: "mtd", label: "MTD", accessibilityLabel: "Month to date" },
+] as const satisfies readonly {
+  value: UsageRange;
+  label: string;
+  accessibilityLabel: string;
+}[];
 
 const METRIC_OPTIONS = [
   { value: "cost", label: "Cost" },
@@ -68,12 +74,12 @@ export function UsageRouteScreen() {
   const insets = useSafeAreaInsets();
   const [tab, setTab] = useState<UsageTab>("usage");
   const [windowSelection, setWindowSelection] = useState(() => ({
-    days: 30,
-    window: makeWindow(30),
+    range: "30d" as UsageRange,
+    window: makeWindow("30d"),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
-  const { days: windowDays, window } = windowSelection;
-  const isPast24Hours = windowDays === 1;
+  const { range, window } = windowSelection;
+  const isPast24Hours = range === "24h";
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { merged, environments, selectedEnvironments, isPending, refresh } = useUsage(
@@ -109,22 +115,19 @@ export function UsageRouteScreen() {
   const [refreshingUsage, setRefreshingUsage] = useState(false);
   const refreshingRef = useRef(false);
   const showingLimits = tab === "limits";
-  const selectWindow = (days: number) => {
-    setWindowSelection({
-      days,
-      window: makeWindow(days, undefined, days === 1 ? "hour" : "day"),
-    });
+  const selectWindow = (nextRange: UsageRange) => {
+    setWindowSelection({ range: nextRange, window: makeWindow(nextRange) });
   };
   const refreshWindow = () => {
     if (refreshingRef.current) return;
-    const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
+    const nextWindow = makeWindow(range);
     if (
       nextWindow.sinceDay !== window.sinceDay ||
       nextWindow.untilDay !== window.untilDay ||
       nextWindow.sinceTime !== window.sinceTime ||
       nextWindow.untilTime !== window.untilTime
     ) {
-      setWindowSelection({ days: windowDays, window: nextWindow });
+      setWindowSelection({ range, window: nextWindow });
     }
     refreshingRef.current = true;
     setRefreshingUsage(true);
@@ -263,8 +266,8 @@ export function UsageRouteScreen() {
                 both change every number below, so they share one bar. */}
               <View className="flex-row items-center gap-3">
                 <SegmentedControl
-                  options={WINDOW_OPTIONS}
-                  selected={windowDays}
+                  options={RANGE_OPTIONS}
+                  selected={range}
                   onSelect={selectWindow}
                   size="compact"
                   className="flex-1"

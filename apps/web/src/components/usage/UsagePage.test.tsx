@@ -15,10 +15,10 @@ vi.mock("react", async (importOriginal) => {
     ...actual,
     useState: vi.fn((initial: unknown) => [
       initial === readUsagePagePreferences
-        ? { metric: testState.metric, windowDays: 30 }
+        ? { metric: testState.metric, range: "30d" }
         : typeof initial === "function"
           ? {
-              days: 1,
+              range: "24h",
               window: {
                 sinceDay: "2026-08-10",
                 untilDay: "2026-08-11",
