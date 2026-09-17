@@ -97,9 +97,7 @@ function waitForCommandLog(
   commandType: string,
   attempts = 40,
 ): Effect.Effect<ReadonlyArray<LoggedPiCommand>> {
-  const readAttempt = (
-    remainingAttempts: number,
-  ): Effect.Effect<ReadonlyArray<LoggedPiCommand>> =>
+  const readAttempt = (remainingAttempts: number): Effect.Effect<ReadonlyArray<LoggedPiCommand>> =>
     Effect.gen(function* () {
       const commands = yield* readCommandLog(filePath);
       if (commands.some((entry) => entry.type === commandType)) {
@@ -198,6 +196,129 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
       if (completed?.type === "turn.completed") {
         assert.equal(completed.payload.state, "completed");
       }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("waits for agent_settled after a continued low-level run", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-agent-settled-thread");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({ PI_MOCK_CONTINUE_AFTER_AGENT_END: "1" }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "continue after agent end", attachments: [] });
+
+      const text = runtimeEvents
+        .filter((event) => event.type === "content.delta")
+        .map((event) => event.payload.delta)
+        .join("");
+      assert.equal(text, "hello from picontinued");
+      assert.lengthOf(
+        runtimeEvents.filter((event) => event.type === "turn.completed"),
+        1,
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("steers a new T3 turn into autonomous Pi extension work", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-autonomous-run-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-autonomous-run-")),
+      );
+      const commandLogPath = NodePath.join(tempDir, "commands.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({
+          PI_MOCK_AUTONOMOUS_AFTER_TURN: "1",
+          PI_MOCK_COMMAND_LOG_PATH: commandLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const runtimeEvents: ProviderRuntimeEvent[] = [];
+      const autonomousStarted = yield* Deferred.make<void>();
+      const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => runtimeEvents.push(event)).pipe(
+          Effect.andThen(
+            event.type === "runtime.warning" &&
+              event.payload.message === "Mock autonomous Pi run started"
+              ? Deferred.succeed(autonomousStarted, undefined)
+              : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "start work", attachments: [] });
+      yield* Deferred.await(autonomousStarted);
+      yield* adapter.sendTurn({ threadId, input: "new direction", attachments: [] });
+
+      const prompts = (yield* readCommandLog(commandLogPath)).filter(
+        (command) => command.type === "prompt",
+      );
+      assert.lengthOf(prompts, 2);
+      assert.equal(prompts[0]?.streamingBehavior, "steer");
+      assert.equal(prompts[1]?.streamingBehavior, "steer");
+      assert.lengthOf(
+        runtimeEvents.filter(
+          (event) => event.type === "turn.completed" && event.payload.state === "completed",
+        ),
+        2,
+      );
+
+      yield* Fiber.interrupt(runtimeEventsFiber);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("atomically steers when Pi becomes busy during prompt acceptance", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-prompt-race-thread");
+      const tempDir = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "pi-prompt-race-")),
+      );
+      const commandLogPath = NodePath.join(tempDir, "commands.log");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockPiWrapper({
+          PI_MOCK_RACE_BUSY_ON_PROMPT: "1",
+          PI_MOCK_COMMAND_LOG_PATH: commandLogPath,
+        }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        threadId,
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "first", attachments: [] });
+      const second = yield* adapter.sendTurn({ threadId, input: "second", attachments: [] });
+
+      const prompts = (yield* readCommandLog(commandLogPath)).filter(
+        (command) => command.type === "prompt",
+      );
+      assert.equal(second.threadId, threadId);
+      assert.lengthOf(prompts, 2);
+      assert.equal(prompts[0]?.streamingBehavior, "steer");
+      assert.equal(prompts[1]?.streamingBehavior, "steer");
 
       yield* adapter.stopSession(threadId);
     }),
@@ -669,9 +790,7 @@ it.layer(piAdapterTestLayer)("PiAdapterLive", (it) => {
 
       const turnCompleted = yield* Deferred.make<void>();
       const runtimeEventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
-        event.type === "turn.completed"
-          ? Deferred.succeed(turnCompleted, undefined)
-          : Effect.void,
+        event.type === "turn.completed" ? Deferred.succeed(turnCompleted, undefined) : Effect.void,
       ).pipe(Effect.forkChild);
 
       yield* adapter.startSession({

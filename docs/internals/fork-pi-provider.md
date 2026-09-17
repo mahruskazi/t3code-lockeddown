@@ -84,11 +84,14 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   stdio (LF-only framing per Pi's spec). Commands carry monotonic `t3-N` ids;
   responses resolve pending deferreds; everything else feeds a single-consumer
   event queue.
-- **Turns.** `sendTurn` writes `prompt` and blocks until the pump observes a
-  settling `agent_end` (retries with `willRetry: true` don't settle). A
-  `sendTurn` during a running turn is a steer (`streamingBehavior: "steer"`)
-  folded into the active turn. `interruptTurn` sends `abort` and settles
-  `cancelled` immediately.
+- **Turns.** `sendTurn` writes `prompt` and blocks until the pump observes
+  `agent_settled`; `agent_end` records only the last low-level run outcome
+  because retries, queued messages, and extension-triggered continuations may
+  follow it. Every prompt carries `streamingBehavior: "steer"`: Pi ignores it
+  while idle and atomically queues the message if extension work starts before
+  command acceptance, so no separate busy-state check can race. Steering during
+  an active T3 turn remains folded into that turn. `interruptTurn` sends `abort`
+  and settles `cancelled` immediately.
 - **Approvals.** Pi runs tools without asking, so the bundled extension
   (`PiExtensionSource.ts`) gates `bash`/`write`/`edit` behind a `select`
   dialog whose title carries `t3-approval:v1:<json>`. In RPC mode that

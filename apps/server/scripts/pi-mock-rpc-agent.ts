@@ -18,6 +18,9 @@
  *   PI_MOCK_SUBAGENT_HANG=1       leave the emitted child running
  *   PI_MOCK_TODOS=1               run a todo_write tool call in the turn
  *   PI_MOCK_NOTIFY=1              emit extension notify events in the turn
+ *   PI_MOCK_AUTONOMOUS_AFTER_TURN=1 start extension-driven work after settling
+ *   PI_MOCK_RACE_BUSY_ON_PROMPT=1 become busy as the second prompt arrives
+ *   PI_MOCK_CONTINUE_AFTER_AGENT_END=1 run a continuation before settling
  *
  * [fork:pi] Test-only. See docs/internals/fork-pi-provider.md.
  */
@@ -37,6 +40,9 @@ const emitSubagents =
 const hangSubagent = process.env.PI_MOCK_SUBAGENT_HANG === "1";
 const emitTodos = process.env.PI_MOCK_TODOS === "1";
 const emitNotify = process.env.PI_MOCK_NOTIFY === "1";
+const autonomousAfterTurn = process.env.PI_MOCK_AUTONOMOUS_AFTER_TURN === "1";
+const raceBusyOnPrompt = process.env.PI_MOCK_RACE_BUSY_ON_PROMPT === "1";
+const continueAfterAgentEnd = process.env.PI_MOCK_CONTINUE_AFTER_AGENT_END === "1";
 
 if (argsLogPath) {
   NodeFS.writeFileSync(argsLogPath, JSON.stringify(process.argv.slice(2)));
@@ -55,8 +61,6 @@ const state = {
   sessionFile,
   thinkingLevel: "medium",
 };
-
-
 
 function writeLine(value: unknown) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -105,6 +109,40 @@ const usage = {
 
 let pendingUiResolve: ((value: Record<string, unknown>) => void) | undefined;
 let aborted = false;
+let autonomousRunStarted = false;
+let promptCount = 0;
+
+function writeAgentEnd(stopReason: "stop" | "aborted" = "stop", settled = true) {
+  if (settled) {
+    state.isStreaming = false;
+  }
+  writeLine({
+    type: "agent_end",
+    messages: [{ role: "assistant", stopReason }],
+    willRetry: false,
+  });
+  if (settled) {
+    writeLine({ type: "agent_settled" });
+  }
+}
+
+async function finishQueuedTurn() {
+  await sleep(2);
+  writeAgentEnd();
+}
+
+async function startAutonomousRunAfterSettlement() {
+  await sleep(2);
+  state.isStreaming = true;
+  writeLine({ type: "agent_start" });
+  writeLine({
+    type: "extension_ui_request",
+    id: `notify-${++notificationId}`,
+    method: "notify",
+    message: "Mock autonomous Pi run started",
+    notifyType: "warning",
+  });
+}
 
 async function runTurn() {
   aborted = false;
@@ -267,12 +305,32 @@ async function runTurn() {
     assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "hello from pi" },
   });
   writeLine({ type: "message_end", message: { role: "assistant" } });
-  state.isStreaming = false;
-  writeLine({
-    type: "agent_end",
-    messages: [{ role: "assistant", stopReason: "stop" }],
-    willRetry: false,
-  });
+  if (continueAfterAgentEnd) {
+    writeAgentEnd("stop", false);
+    await sleep(2);
+    writeLine({ type: "agent_start" });
+    writeLine({
+      type: "message_update",
+      usage,
+      assistantMessageEvent: { type: "text_start", contentIndex: 1 },
+    });
+    writeLine({
+      type: "message_update",
+      usage,
+      assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "continued" },
+    });
+    writeLine({
+      type: "message_update",
+      usage,
+      assistantMessageEvent: { type: "text_end", contentIndex: 1, content: "continued" },
+    });
+    writeLine({ type: "message_end", message: { role: "assistant" } });
+  }
+  writeAgentEnd();
+  if (autonomousAfterTurn && !autonomousRunStarted) {
+    autonomousRunStarted = true;
+    void startAutonomousRunAfterSettlement();
+  }
   if (emitSubagents && !hangSubagent) {
     subagentMarker({
       kind: "progress",
@@ -381,8 +439,27 @@ function handleCommand(command: Record<string, unknown>) {
       return;
     }
     case "prompt": {
+      promptCount += 1;
       if (failPrompt) {
         respondError(id, "prompt", "Mock prompt failure.");
+        return;
+      }
+      const streamingBehavior = command.streamingBehavior;
+      if (raceBusyOnPrompt && promptCount === 2 && !state.isStreaming) {
+        state.isStreaming = true;
+        writeLine({ type: "agent_start" });
+      }
+      if (state.isStreaming) {
+        if (streamingBehavior !== "steer" && streamingBehavior !== "followUp") {
+          respondError(
+            id,
+            "prompt",
+            "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+          );
+          return;
+        }
+        respond(id, "prompt");
+        void finishQueuedTurn();
         return;
       }
       respond(id, "prompt");
@@ -393,11 +470,7 @@ function handleCommand(command: Record<string, unknown>) {
       aborted = true;
       state.isStreaming = false;
       respond(id, "abort");
-      writeLine({
-        type: "agent_end",
-        messages: [{ role: "assistant", stopReason: "aborted" }],
-        willRetry: false,
-      });
+      writeAgentEnd("aborted");
       return;
     }
     case "extension_ui_response": {

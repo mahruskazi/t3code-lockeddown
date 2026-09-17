@@ -2,10 +2,10 @@
  * PiAdapter — provider adapter for the Pi coding agent (`pi --mode rpc`).
  *
  * One `PiRpcProcess` per thread session. Turn lifecycle is event-driven:
- * `sendTurn` writes a `prompt` command and blocks until the pump observes a
- * settling `agent_end` (or the turn is interrupted / the process dies).
- * A `sendTurn` while a turn is streaming is a steer — the prompt is sent
- * with `streamingBehavior: "steer"` and folded into the active turn.
+ * `sendTurn` writes a `prompt` command and blocks until the pump observes
+ * `agent_settled` (or the turn is interrupted / the process dies).
+ * Prompts always carry `streamingBehavior: "steer"`; Pi ignores it while idle
+ * and queues atomically when an extension starts work concurrently.
  *
  * Approvals ride Pi's extension UI protocol: the bundled T3 extension
  * (PiExtensionSource.ts) gates mutating tools behind a `select` dialog whose
@@ -181,6 +181,8 @@ interface PiSessionContext {
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   turns: Array<{ id: TurnId; items: Array<unknown> }>;
   activeTurnId: TurnId | undefined;
+  /** Last low-level run outcome, applied only when Pi emits `agent_settled`. */
+  pendingSettlement: TurnSettlement | undefined;
   /** Resolved when the active turn settles; one per started turn. */
   turnDone: Map<TurnId, Deferred.Deferred<TurnSettlement>>;
   /** Turns already interrupted; late events must not resurrect them. */
@@ -341,6 +343,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       Effect.gen(function* () {
         const done = ctx.turnDone.get(turnId);
         ctx.turnDone.delete(turnId);
+        ctx.pendingSettlement = undefined;
         const isActive = ctx.activeTurnId === turnId;
         if (isActive) {
           ctx.activeTurnId = undefined;
@@ -824,6 +827,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             );
             return;
           }
+          case "agent_start": {
+            ctx.pendingSettlement = undefined;
+            return;
+          }
+          case "agent_settled": {
+            const activeTurnId = ctx.activeTurnId;
+            const settlement = ctx.pendingSettlement;
+            if (
+              activeTurnId === undefined ||
+              settlement === undefined ||
+              ctx.interruptedTurnIds.has(activeTurnId)
+            ) {
+              ctx.pendingSettlement = undefined;
+              return;
+            }
+            yield* logNative(ctx.threadId, "agent_settled", {});
+            yield* settleTurn(ctx, activeTurnId, settlement);
+            return;
+          }
           default:
             break;
         }
@@ -1048,19 +1070,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           }
           case "agent_end": {
             const outcome = parsePiAgentEnd(event);
-            if (outcome.willRetry) {
-              return;
-            }
             yield* logNative(ctx.threadId, "agent_end", { willRetry: outcome.willRetry });
-            yield* settleTurn(
-              ctx,
-              turnId,
-              outcome.errorMessage !== undefined
-                ? { state: "failed", errorMessage: outcome.errorMessage }
-                : outcome.aborted
-                  ? { state: "cancelled" }
-                  : { state: "completed" },
-            );
+            if (!outcome.willRetry) {
+              ctx.pendingSettlement =
+                outcome.errorMessage !== undefined
+                  ? { state: "failed", errorMessage: outcome.errorMessage }
+                  : outcome.aborted
+                    ? { state: "cancelled" }
+                    : { state: "completed" };
+            }
             return;
           }
           default:
@@ -1187,19 +1205,17 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             requestedThinkingLevel !== undefined &&
             (modelWasSwitched || requestedThinkingLevel !== state.thinkingLevel)
           ) {
-            yield* rpc
-              .request({ type: "set_thinking_level", level: requestedThinkingLevel })
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapterRequestError({
-                      provider: PROVIDER,
-                      method: "set_thinking_level",
-                      detail: cause.message,
-                      cause,
-                    }),
-                ),
-              );
+            yield* rpc.request({ type: "set_thinking_level", level: requestedThinkingLevel }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "set_thinking_level",
+                    detail: cause.message,
+                    cause,
+                  }),
+              ),
+            );
             boundThinkingLevel = requestedThinkingLevel;
           }
 
@@ -1233,6 +1249,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             pendingUserInputs: new Map(),
             turns: [],
             activeTurnId: undefined,
+            pendingSettlement: undefined,
             turnDone: new Map(),
             interruptedTurnIds: new Set(),
             activeContentItems: new Map(),
@@ -1297,7 +1314,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           Effect.gen(function* () {
             const ctx = yield* requireSession(input.threadId);
             const steeringTurnId = ctx.activeTurnId;
-            const steering = steeringTurnId !== undefined;
+            const reuseActiveTurn = steeringTurnId !== undefined;
             const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
 
             const text = input.input?.trim();
@@ -1375,26 +1392,24 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               requestedLevel !== undefined &&
               (modelWasSwitched || requestedLevel !== ctx.currentThinkingLevel)
             ) {
-              yield* ctx.rpc
-                .request({ type: "set_thinking_level", level: requestedLevel })
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new ProviderAdapterRequestError({
-                        provider: PROVIDER,
-                        method: "set_thinking_level",
-                        detail: cause.message,
-                        cause,
-                      }),
-                  ),
-                );
+              yield* ctx.rpc.request({ type: "set_thinking_level", level: requestedLevel }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "set_thinking_level",
+                      detail: cause.message,
+                      cause,
+                    }),
+                ),
+              );
               ctx.currentThinkingLevel = requestedLevel;
             }
 
             const done = ctx.turnDone.get(turnId) ?? (yield* Deferred.make<TurnSettlement>());
             ctx.turnDone.set(turnId, done);
             ctx.activeTurnId = turnId;
-            if (!steering) {
+            if (!reuseActiveTurn) {
               ctx.lastUsage = undefined;
             }
             ctx.session = {
@@ -1415,7 +1430,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               },
             ];
 
-            if (!steering) {
+            if (!reuseActiveTurn) {
               yield* offerRuntimeEvent({
                 type: "turn.started",
                 ...(yield* makeEventStamp()),
@@ -1426,22 +1441,22 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               });
             }
 
-            return { ctx, turnId, done, steering, text, images };
+            return { ctx, turnId, done, text, images };
           }),
         );
 
-        const { ctx, turnId, done, steering } = prepared;
+        const { ctx, turnId, done } = prepared;
 
-        // The prompt ack may arrive immediately or only at end-of-turn
-        // depending on the Pi version; run it concurrently and let a
-        // failed ack settle the turn.
+        // Pi accepts streamingBehavior while idle and consults it atomically if
+        // extension work starts before this command arrives. Always specifying
+        // steer removes the state-check race without duplicating the prompt.
         yield* prepared.ctx.rpc
           .request(
             {
               type: "prompt",
               ...(prepared.text ? { message: prepared.text } : { message: "" }),
               ...(prepared.images.length > 0 ? { images: prepared.images } : {}),
-              ...(steering ? { streamingBehavior: "steer" } : {}),
+              streamingBehavior: "steer",
             },
             { timeout: PROMPT_REQUEST_TIMEOUT },
           )
