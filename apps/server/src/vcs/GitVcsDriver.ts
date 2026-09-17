@@ -711,10 +711,22 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       return path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(cwd, gitCommonDir);
     });
 
+  const resolveGitIndexPath = (cwd: string) =>
+    Effect.gen(function* () {
+      const result = yield* execute({
+        operation: "GitVcsDriver.checkpoints.resolveGitIndexPath",
+        cwd,
+        args: ["rev-parse", "--git-path", "index"],
+      });
+      const gitIndexPath = result.stdout.trim();
+      return path.isAbsolute(gitIndexPath) ? gitIndexPath : path.resolve(cwd, gitIndexPath);
+    });
+
   const checkpoints: VcsDriver.VcsCheckpointOps = {
     captureCheckpoint: Effect.fn("GitVcsDriver.checkpoints.captureCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.captureCheckpoint";
       const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
+      const gitIndexPath = yield* resolveGitIndexPath(input.cwd);
       const tempIndexPath = path.join(
         gitCommonDir,
         `t3-checkpoint-index-${NodeCrypto.randomUUID()}`,
@@ -734,7 +746,21 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
 
       yield* Effect.gen(function* () {
         const headExists = yield* hasHeadCommit(input.cwd);
-        if (headExists) {
+        const copiedUserIndex = yield* fileSystem.copyFile(gitIndexPath, tempIndexPath).pipe(
+          Effect.as(true),
+          Effect.catch(() => Effect.succeed(false)),
+        );
+        if (copiedUserIndex) {
+          // Reuse Git's stat cache so large repositories do not re-hash every tracked file.
+          // --really-refresh still notices files marked assume-unchanged before add stages them.
+          yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: ["update-index", "-q", "--really-refresh"],
+            env: commitEnv,
+            allowNonZeroExit: true,
+          });
+        } else if (headExists) {
           yield* execute({
             operation,
             cwd: input.cwd,

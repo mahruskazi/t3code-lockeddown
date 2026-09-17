@@ -116,6 +116,60 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
     );
   });
 
+  describe("captureCheckpoint", () => {
+    it.effect("reuses the user index stat cache for unchanged files", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const filterRunsPath = NodePath.join(tmp, ".git", "checkpoint-filter-runs");
+        const filterScriptPath = NodePath.join(tmp, ".git", "checkpoint-filter.mjs");
+        yield* writeTextFile(
+          filterScriptPath,
+          [
+            'import { appendFileSync } from "node:fs";',
+            'appendFileSync(".git/checkpoint-filter-runs", "run\\n");',
+            "process.stdin.pipe(process.stdout);",
+            "",
+          ].join("\n"),
+        );
+        yield* git(tmp, ["config", "filter.checkpoint.clean", "node .git/checkpoint-filter.mjs"]);
+        yield* git(tmp, ["config", "filter.checkpoint.required", "true"]);
+        yield* writeTextFile(NodePath.join(tmp, ".gitattributes"), "README.md filter=checkpoint\n");
+        yield* fileSystem.utimes(NodePath.join(tmp, "README.md"), 1_000, 1_000);
+        yield* git(tmp, ["add", ".gitattributes", "README.md"]);
+        yield* git(tmp, ["commit", "-m", "configure filter"]);
+        yield* fileSystem.remove(filterRunsPath, { force: true });
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: checkpointRefForThreadTurn(ThreadId.make("stat-cache"), 0),
+        });
+
+        expect(yield* fileSystem.exists(filterRunsPath)).toBe(false);
+      }),
+    );
+
+    it.effect("captures files marked assume-unchanged without changing the user index", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const fileSystem = yield* FileSystem.FileSystem;
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const checkpointRef = checkpointRefForThreadTurn(ThreadId.make("assume-unchanged"), 0);
+        yield* git(tmp, ["update-index", "--assume-unchanged", "README.md"]);
+        const userIndex = yield* fileSystem.readFile(NodePath.join(tmp, ".git", "index"));
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "# changed\n");
+
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef });
+
+        expect(yield* git(tmp, ["show", `${checkpointRef}:README.md`])).toBe("# changed");
+        expect(yield* fileSystem.readFile(NodePath.join(tmp, ".git", "index"))).toEqual(userIndex);
+      }),
+    );
+  });
+
   describe("diffCheckpoints", () => {
     it.effect("returns full oversized checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
