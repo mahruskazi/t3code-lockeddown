@@ -27,7 +27,7 @@ if [ "$(sed -n 's/^  "name": "\(.*\)",$/\1/p' "$REPO_ROOT/apps/server/package.js
   exit 1
 fi
 
-PNPM_VERSION="$(sed -n 's/^  "packageManager": "pnpm@\(.*\)",$/\1/p' "$REPO_ROOT/package.json")"
+PNPM_VERSION="$(sed -n 's/^  "packageManager": "pnpm@\(.*\)"[,]*$/\1/p' "$REPO_ROOT/package.json")"
 if [ -z "$PNPM_VERSION" ]; then
   echo "error: could not read pnpm version from package.json" >&2
   exit 1
