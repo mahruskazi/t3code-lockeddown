@@ -18,6 +18,7 @@ import {
   CLAUDE_CAPABILITIES_PROBE_SETTING_SOURCES,
   probeClaudeCapabilities,
 } from "./ClaudeProvider.ts";
+import { DEFAULT_TIMEOUT_MS } from "../providerSnapshot.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
@@ -211,7 +212,8 @@ it.effect("preserves initialized capabilities when optional usage times out", ()
       decodeClaudeSettings({ binaryPath: "claude" }),
     ).pipe(Effect.forkChild);
     yield* Deferred.await(usageStarted);
-    yield* TestClock.adjust("4 seconds");
+    // The fork raises the usage deadline; advance past whatever it is.
+    yield* TestClock.adjust(`${DEFAULT_TIMEOUT_MS} millis`);
     const capabilities = yield* Fiber.join(probe);
     assert.equal(capabilities?.email, "dev@example.com");
     assert.equal(capabilities?.subscriptionType, "pro");

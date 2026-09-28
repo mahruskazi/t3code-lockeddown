@@ -25,7 +25,7 @@ afterEach(() => {
 
 describe("Usage page preferences", () => {
   it("uses defaults when no preference has been saved", () => {
-    expect(readUsagePagePreferences()).toEqual({ metric: "cost", range: "30d" });
+    expect(readUsagePagePreferences()).toEqual({ metric: "limits", range: "30d" });
   });
 
   it.each(["24h", "7d", "30d", "90d", "mtd"] as const)(
@@ -53,7 +53,7 @@ describe("Usage page preferences", () => {
     '{"metric":"cost","windowDays":365}',
   ])("replaces invalid preferences on the next save: %s", (value) => {
     values.set(key, value);
-    expect(readUsagePagePreferences()).toEqual({ metric: "cost", range: "30d" });
+    expect(readUsagePagePreferences()).toEqual({ metric: "limits", range: "30d" });
     saveUsagePagePreferences({ metric: "tokens", range: "7d" });
     expect(readUsagePagePreferences()).toEqual({ metric: "tokens", range: "7d" });
   });
@@ -76,7 +76,7 @@ describe("Usage page preferences", () => {
         throw new Error("SecurityError");
       },
     });
-    expect(readUsagePagePreferences()).toEqual({ metric: "cost", range: "30d" });
+    expect(readUsagePagePreferences()).toEqual({ metric: "limits", range: "30d" });
     expect(() => saveUsagePagePreferences({ metric: "tokens", range: "7d" })).not.toThrow();
   });
 });

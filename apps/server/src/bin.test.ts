@@ -15,6 +15,8 @@ import {
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
+import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -39,6 +41,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
+import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import {
@@ -99,8 +102,11 @@ const makeCliTestServerConfig = (baseDir: string) =>
       traceMaxFiles: 10,
       otlpTracesUrl: undefined,
       otlpMetricsUrl: undefined,
-      otlpExportIntervalMs: 10_000,
-      otlpServiceName: "t3-server",
+      otlpLogsUrl: undefined,
+      otlpTracesExport: DEFAULT_SIGNAL_EXPORT,
+      otlpMetricsExport: DEFAULT_SIGNAL_EXPORT,
+      otlpLogsExport: DEFAULT_SIGNAL_EXPORT,
+      otelEnvironment: OtelEnvironment.none,
       mode: "web",
       port: 0,
       host: "127.0.0.1",
@@ -361,7 +367,16 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
   Effect.gen(function* () {
     const config = yield* makeCliTestServerConfig(baseDir);
     const routesLayer = HttpApiBuilder.layer(ProjectCliHttpApi).pipe(
-      Layer.provide(orchestrationHttpApiLayer),
+      Layer.provide(
+        orchestrationHttpApiLayer.pipe(
+          Layer.provide(
+            Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({
+              get: () => Effect.succeed(null),
+              discard: () => Effect.void,
+            }),
+          ),
+        ),
+      ),
       Layer.provide(environmentAuthenticatedAuthLayer),
     );
     const appLayer = HttpRouter.serve(routesLayer, {
@@ -470,6 +485,20 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
       assert.include(withConnect.output, "project");
       assert.notInclude(withConnect.output, "triage");
       assert.notInclude(withoutConnect.output, "triage");
+    }),
+  );
+
+  // [fork:lockdown] Tripwire: `t3 update` downloads a pingdotgg/t3code release
+  // archive from GitHub and runs it. This fork only runs builds it provisioned
+  // (invariant 2); an upstream merge that restores the registration fails here.
+  it.effect("does not register the upstream self-download update command", () =>
+    Effect.gen(function* () {
+      const withConnect = yield* captureStdout(runCli(["--help"], connectCli));
+      const withoutConnect = yield* captureStdout(runCli(["--help"], noConnectCli));
+
+      assert.match(withConnect.output, /^\s+uninstall\b/m);
+      assert.notMatch(withConnect.output, /^\s+update\b/m);
+      assert.notMatch(withoutConnect.output, /^\s+update\b/m);
     }),
   );
 

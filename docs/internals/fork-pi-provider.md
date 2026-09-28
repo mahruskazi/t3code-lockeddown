@@ -37,25 +37,27 @@ git grep -n "fork:pi"   # every fork touch point, at any time
 
 ## Upstream files touched (all marked `[fork:pi]`)
 
-| File                                                         | Edit                                                                                                                            |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/contracts/src/settings.ts`                         | `PiSettings` schema block; `providers.pi` struct entry; `PiSettingsPatch` + patch entry                                         |
-| `packages/contracts/src/model.ts`                            | `PI_DRIVER_KIND`; entries in `DEFAULT_MODEL_BY_PROVIDER`, `DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER`, `PROVIDER_DISPLAY_NAMES` |
-| `packages/contracts/src/providerRuntime.ts`                  | `pi.rpc` / `pi.rpc.extension` raw-source literals                                                                               |
-| `apps/server/src/provider/builtInDrivers.ts`                 | Driver import, env union member, `BUILT_IN_DRIVERS` entry                                                                       |
-| `apps/server/src/provider/Layers/ProviderRegistry.test.ts`   | Two provider-enumeration expectations (`pi` disabled in one fixture; `pi` in the sorted instance list)                          |
-| `apps/web/src/session-logic.ts`                              | `PROVIDER_OPTIONS` entry                                                                                                        |
-| `apps/web/src/components/settings/providerDriverMeta.ts`     | Client definition entry + imports                                                                                               |
-| `apps/web/src/components/chat/providerIconUtils.ts`          | Icon map entry + import                                                                                                         |
-| `apps/web/src/components/settings/ProviderModelsSection.tsx` | Custom-model placeholder entry                                                                                                  |
-| `apps/mobile/src/components/ProviderIcon.tsx`                | π icon branch                                                                                                                   |
-| `packages/contracts/src/usage.ts`                            | `pi` in `UsageProviderKind`; the `USAGE_CONTRACT_VERSION` bump that goes with it                                                |
-| `apps/server/src/usage/usageTranscriptReader.ts`             | Pi branch in the per-line reducer                                                                                               |
-| `apps/server/src/usage/usageTranscripts.ts`                  | Comment noting Pi gates in the reader instead                                                                                   |
-| `apps/server/src/usage/UsageService.ts`                      | Pi entry in `resolveTranscriptDirs`                                                                                             |
-| `apps/web/src/components/usage/usageProviders.ts`            | Pi presentation entry                                                                                                           |
-| `apps/mobile/src/features/usage/usageProviders.ts`           | Pi label, colour, and stack order                                                                                               |
-| `docs/internals/providers.md`                                | Driver table row + fork note                                                                                                    |
+| File                                                             | Edit                                                                                                                            |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/src/settings.ts`                             | `PiSettings` schema block; `providers.pi` struct entry; `PiSettingsPatch` + patch entry                                         |
+| `packages/contracts/src/model.ts`                                | `PI_DRIVER_KIND`; entries in `DEFAULT_MODEL_BY_PROVIDER`, `DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER`, `PROVIDER_DISPLAY_NAMES` |
+| `packages/contracts/src/providerRuntime.ts`                      | `pi.rpc` / `pi.rpc.extension` raw-source literals                                                                               |
+| `apps/server/src/provider/builtInDrivers.ts`                     | Driver import, env union member, `BUILT_IN_DRIVERS` entry                                                                       |
+| `apps/server/src/provider/Layers/ProviderRegistry.test.ts`       | Two provider-enumeration expectations (`pi` disabled in one fixture; `pi` in the sorted instance list)                          |
+| `apps/web/src/session-logic.ts`                                  | `PROVIDER_OPTIONS` entry                                                                                                        |
+| `apps/web/src/components/settings/providerDriverMeta.ts`         | Client definition entry + imports                                                                                               |
+| `apps/web/src/components/chat/providerIconUtils.ts`              | Icon map entry + import                                                                                                         |
+| `apps/web/src/components/settings/ProviderModelsSection.tsx`     | Custom-model placeholder entry                                                                                                  |
+| `apps/mobile/src/components/ProviderIcon.tsx`                    | π icon branch                                                                                                                   |
+| `packages/contracts/src/usage.ts`                                | `pi` in `UsageProviderKind`; provider variants are additive upstream now, so no contract version bump goes with it              |
+| `apps/server/src/usage/usageTranscriptReader.ts`                 | Pi branch in the per-line reducer                                                                                               |
+| `apps/server/src/usage/usageTranscripts.ts`                      | Comment noting Pi gates in the reader instead                                                                                   |
+| `apps/server/src/usage/UsageService.ts`                          | Pi entry in `resolveTranscriptDirs`                                                                                             |
+| `apps/web/src/components/usage/usageProviders.ts`                | Pi presentation entry                                                                                                           |
+| `apps/web/src/components/settings/AddProviderInstanceDialog.tsx` | Drops upstream's "Pi Agent — coming soon" placeholder                                                                           |
+| `apps/server/src/provider/providerCompatibility.test.ts`         | Exempts `pi` from the bundled compatibility-policy check; upstream's manifest has no Pi policy                                  |
+| `apps/mobile/src/features/usage/usageProviders.ts`               | Pi label, colour, and stack order                                                                                               |
+| `docs/internals/providers.md`                                    | Driver table row + fork note                                                                                                    |
 
 Deliberately **not** touched (fallbacks handle the unknown driver kind):
 `contextWindow.ts` (title-cases unknown kinds → "Pi"),

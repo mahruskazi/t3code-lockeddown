@@ -11,7 +11,10 @@ const UsagePagePreferencesSchema = Schema.Struct({
 });
 export type UsagePagePreferences = typeof UsagePagePreferencesSchema.Type;
 
-const DEFAULTS: UsagePagePreferences = { metric: "cost", range: "30d" };
+// Limits is what most people open the page for (how much subscription quota is
+// left, and when it resets), so it is the first-visit default; the last picked
+// tab sticks after that.
+const DEFAULT_PREFERENCES: UsagePagePreferences = { metric: "limits", range: "30d" };
 
 // The range used to be stored as a plain day count, which month to date cannot
 // express: its length changes as the month goes on. Preferences saved under
@@ -24,7 +27,7 @@ const LEGACY_RANGES = { 1: "24h", 7: "7d", 30: "30d", 90: "90d" } as const;
 
 export function readUsagePagePreferences(): UsagePagePreferences {
   try {
-    return getLocalStorageItem(STORAGE_KEY, UsagePagePreferencesSchema) ?? DEFAULTS;
+    return getLocalStorageItem(STORAGE_KEY, UsagePagePreferencesSchema) ?? DEFAULT_PREFERENCES;
   } catch (error) {
     try {
       const legacy = getLocalStorageItem(STORAGE_KEY, LegacyPreferencesSchema);
@@ -34,7 +37,7 @@ export function readUsagePagePreferences(): UsagePagePreferences {
       // Not the old shape either, so report the original failure below.
     }
     console.error("Could not read Usage page preferences.", error);
-    return DEFAULTS;
+    return DEFAULT_PREFERENCES;
   }
 }
 

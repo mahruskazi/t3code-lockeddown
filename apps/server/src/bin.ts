@@ -17,8 +17,13 @@ import { isEntrypoint } from "./entrypoint.ts";
 import { projectCommand } from "./cli/project.ts";
 import { runServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { serviceCommand } from "./cli/service.ts";
+import { uninstallCommand } from "./cli/uninstall.ts";
+import { claudeHistoryCommand } from "./cli/claudeHistory.ts";
+import { serviceLauncherCommand } from "./cli/serviceLauncher.ts";
 import { servicePreflightCommand } from "./cli/servicePreflight.ts";
+import { sshHelperCommand } from "./cli/sshHelper.ts";
 import { themeCommand } from "./cli/theme.ts";
+import { traceCommand } from "./cli/trace.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
 
@@ -32,7 +37,7 @@ class ConnectPublicConfigMissingError extends CliError.UserError {
 }
 
 const connectUnavailableCommand = Command.make("connect", {
-  command: Argument.string("command").pipe(Argument.variadic),
+  command: Argument.String("command").pipe(Argument.variadic),
 }).pipe(
   Command.withDescription("T3 Connect is unavailable in builds without public configuration."),
   Command.unlisted,
@@ -52,8 +57,13 @@ const connectUnavailableCommand = Command.make("connect", {
  * logs, then file a public issue on pingdotgg/t3code. On a machine holding
  * proprietary code that evidence is the confidential material, and upstream's
  * redaction step covers credentials and home paths but not source, prompts, or
- * repo identities. This fork does not register it. Tripwire: bin.test.ts
- * asserts `triage` is absent from the CLI.
+ * repo identities. This fork does not register it.
+ *
+ * [fork:lockdown] Upstream also registers `update`, which downloads a
+ * pingdotgg/t3code GitHub release archive and runs it. This fork runs only
+ * builds it provisioned (invariant 2), so it does not register that either.
+ * `cli/update.ts` stays because `uninstall` reuses its launcher helpers.
+ * Tripwire: bin.test.ts asserts `triage` and `update` are absent from the CLI.
  */
 export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
   Command.make("t3", { ...sharedServerCommandFlags }).pipe(
@@ -67,8 +77,13 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       authCommand,
       projectCommand,
       serviceCommand,
+      uninstallCommand,
+      serviceLauncherCommand,
+      claudeHistoryCommand,
       servicePreflightCommand,
+      sshHelperCommand,
       themeCommand,
+      traceCommand,
       cloudEnabled ? connectCommand : connectUnavailableCommand,
     ]),
   );
