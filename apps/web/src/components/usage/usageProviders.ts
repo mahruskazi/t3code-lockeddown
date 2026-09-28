@@ -1,6 +1,14 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { ClaudeAI, GrokIcon, type Icon, OpenAI } from "../Icons";
+import {
+  AntigravityIcon,
+  ClaudeAI,
+  CursorIcon,
+  GrokIcon,
+  type Icon,
+  OpenAI,
+  OpenCodeIcon,
+} from "../Icons";
 // [fork:pi] Pi's mark is deliberately kept out of Icons.tsx.
 import { PiIcon } from "../PiIcon";
 
@@ -32,6 +40,9 @@ export const PROVIDER_PRESENTATION = {
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     mark: GrokIcon,
   },
+  cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
+  opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
+  antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
   // [fork:pi]
   pi: {
     label: "Pi",

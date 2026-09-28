@@ -1,13 +1,14 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { ServerSelfUpdateError, ThreadId } from "@t3tools/contracts";
-import { HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Path from "effect/Path";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as ServerConfig from "../config.ts";
@@ -25,12 +26,34 @@ interface HarnessOptions {
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   /**
    * Pre-provision the pinned runtime on disk. [fork:lockdown] This fork
-   * never downloads runtimes from npm, so an update can only proceed against
+   * never downloads runtimes, so an update can only proceed against
    * a runtime that is already there.
    */
   readonly seedRuntime?: boolean;
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
 }
+
+// Upstream stages the runtime from a release archive. [fork:lockdown] These
+// fakes serve one and stand in for tar, recording "download" and "extract"
+// if a download path is ever restored; the fork's tests assert neither runs.
+const archiveBytes = new TextEncoder().encode("not really a tarball");
+const releaseHttpClient = (order: string[]) =>
+  HttpClient.make((request) =>
+    Effect.gen(function* () {
+      if (request.url.endsWith("/SHA256SUMS")) {
+        const digest = yield* Effect.promise(() => crypto.subtle.digest("SHA-256", archiveBytes));
+        const hex = Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0"),
+        ).join("");
+        return HttpClientResponse.fromWeb(
+          request,
+          new Response(`${hex}  t3-1.1.0-linux-x64.tar.gz\n`),
+        );
+      }
+      order.push("download");
+      return HttpClientResponse.fromWeb(request, new Response(archiveBytes));
+    }),
+  );
 
 const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   options: HarnessOptions = {},
@@ -39,22 +62,20 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const path = yield* Path.Path;
   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-self-update-test-" });
   if (options.seedRuntime ?? true) {
-    const runtime = pinnedRuntimePaths(path, baseDir, "1.1.0");
+    const runtime = pinnedRuntimePaths(path, baseDir, "1.1.0", "linux");
     yield* fs.makeDirectory(path.dirname(runtime.entryPath), { recursive: true });
-    yield* fs.writeFileString(runtime.entryPath, "export {};\n");
+    yield* fs.writeFileString(runtime.entryPath, "#!/bin/sh\n");
     yield* fs.writeFileString(runtime.sentinelPath, "1.1.0\n");
   }
   const order: string[] = [];
   const runner = ProcessRunner.ProcessRunner.of({
     run: (input) =>
       Effect.gen(function* () {
-        if (input.command === "npm") {
-          order.push("install");
-          const prefix = input.args[input.args.indexOf("--prefix") + 1];
-          if (prefix === undefined) return yield* Effect.die("missing npm prefix");
-          const entry = path.join(prefix, "node_modules", "t3", "dist", "bin.mjs");
-          yield* fs.makeDirectory(path.dirname(entry), { recursive: true }).pipe(Effect.orDie);
-          yield* fs.writeFileString(entry, "export {};\n").pipe(Effect.orDie);
+        if (input.command === "tar") {
+          order.push("extract");
+          const stagingDir = input.args[input.args.indexOf("-C") + 1];
+          if (stagingDir === undefined) return yield* Effect.die("missing tar target");
+          yield* fs.writeFileString(path.join(stagingDir, "t3"), "#!/bin/sh\n").pipe(Effect.orDie);
           return {
             stdout: "",
             stderr: "",
@@ -97,7 +118,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           order.push("accept");
           return "launcher-id";
         })),
-    prepareTrial: Effect.sync((): undefined => undefined),
+    prepareTrial: Effect.undefined,
   });
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
@@ -112,7 +133,9 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
         run: () => Effect.die("unexpected desktop app update run"),
       },
     ),
-    Effect.provideService(HostProcessExecutablePath, "/usr/bin/node"),
+    Effect.provideService(HttpClient.HttpClient, releaseHttpClient(order)),
+    Effect.provideService(HostProcessPlatform, "linux"),
+    Effect.provideService(HostProcessArchitecture, "x64"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
   return { selfUpdate, order };
@@ -343,7 +366,7 @@ it.layer(NodeServices.layer)("server self update", (it) => {
         updateId: "launcher-id",
       });
       // [fork:lockdown] "install" must never appear here. The fake runner
-      // records it if the npm install path is ever restored.
+      // records "download" and "extract" if a download path is ever restored.
       expect(order).toEqual(["preflight", "accept"]);
     }),
   );

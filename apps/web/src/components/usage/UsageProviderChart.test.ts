@@ -91,6 +91,9 @@ describe("buildPeriodColumns", () => {
       // [fork:pi] Bands are zero-filled per provider so the paths line up
       // across days; Grok and Pi join the order even on a day they did not run.
       { provider: "grok", value: 0 },
+      { provider: "cursor", value: 0 },
+      { provider: "opencode", value: 0 },
+      { provider: "antigravity", value: 0 },
       { provider: "pi", value: 0 },
     ]);
   });

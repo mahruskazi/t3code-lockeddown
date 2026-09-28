@@ -56,16 +56,30 @@ const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
 const REMOTE_READY_TIMEOUT_MS = 60_000;
 const REMOTE_LAUNCH_TIMEOUT_MS = 90_000;
+// Upstream sizes this for a cold archive download on the remote.
+// [fork:lockdown] The fork's runner never downloads, but a provisioned t3 still
+// gets the same budget so a slow first boot is not cut short.
+const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 
 export interface RemoteT3RunnerOptions {
-  readonly packageSpec?: string;
+  /**
+   * Dev mode: run `node <path>` on the remote instead of a release archive.
+   * The only mode that needs Node on the remote.
+   */
   readonly nodeScriptPath?: string | null;
   readonly nodeEngineRange?: string | null;
+  /**
+   * Exact version the client expects. Upstream downloads its release archive;
+   * [fork:lockdown] this fork only names it in the provisioning error and runs
+   * the `t3` that scripts/setup-remote-t3.sh put on the remote PATH.
+   */
+  readonly archiveVersion?: string | null;
+  /** Upstream's release download origin. [fork:lockdown] Never read. */
+  readonly releaseBaseUrl?: string | null;
 }
 
 export interface SshEnvironmentManagerOptions {
-  readonly resolveCliPackageSpec?: () => string;
   readonly resolveCliRunner?: Effect.Effect<RemoteT3RunnerOptions>;
 }
 
@@ -107,14 +121,18 @@ function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
   };
 }
 
+function isNodeScriptRunner(runner: RemoteT3RunnerOptions | undefined): boolean {
+  return Boolean(runner?.nodeScriptPath?.trim());
+}
+
 function sshRunnerLogFields(runner: RemoteT3RunnerOptions | undefined) {
   if (runner?.nodeScriptPath?.trim()) {
     return { runner: "node-script", nodeScriptPath: runner.nodeScriptPath.trim() };
   }
-  if (runner?.packageSpec?.trim()) {
-    return { runner: "package", packageSpec: runner.packageSpec.trim() };
+  if (runner?.archiveVersion?.trim()) {
+    return { runner: "archive", archiveVersion: runner.archiveVersion.trim() };
   }
-  return { runner: "default" };
+  return { runner: "archive" };
 }
 
 interface SshAuthOperationInput<T> {
@@ -336,6 +354,7 @@ ensure_remote_node_path() {
   prepend_path_if_dir "$HOME/.local/bin"
   prepend_path_if_dir "$HOME/bin"
   prepend_path_if_dir "/opt/homebrew/bin"
+  prepend_path_if_dir "/home/linuxbrew/.linuxbrew/bin"
   prepend_path_if_dir "/usr/local/bin"
   prepend_path_if_dir "/usr/bin"
   prepend_path_if_dir "/bin"
@@ -402,29 +421,36 @@ ensure_remote_node_path() {
 }
 `;
 
-// [fork:lockdown] Upstream falls back to `npx t3@<version>` when the remote host
-// has no t3 on PATH. This fork has no npm fallback at all: a remote host runs the
-// build scripts/setup-remote-t3.sh put there, or it runs nothing.
+// [fork:lockdown] Upstream's runner downloads a pingdotgg/t3code release archive
+// (it used to fall back to `npx t3@<version>`) when the remote host has no
+// runtime for the version. This fork has no download path at all: a remote host
+// runs the build scripts/setup-remote-t3.sh put on its PATH, or it runs nothing.
 export const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
 set -eu
 @@T3_NODE_ENV_SCRIPT@@
-ensure_remote_node_path || true
 T3_NODE_SCRIPT_PATH=@@T3_NODE_SCRIPT_PATH@@
 if [ -n "$T3_NODE_SCRIPT_PATH" ]; then
+  # Dev mode: a source checkout on the remote. This is the only path that
+  # needs Node, so Node discovery runs here and nowhere else.
+  ensure_remote_node_path || true
   if ! command -v node >/dev/null 2>&1; then
     printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
     exit 1
   fi
   exec node "$T3_NODE_SCRIPT_PATH" "$@"
 fi
+T3_ARCHIVE_VERSION=@@T3_ARCHIVE_VERSION@@
+# Non-interactive SSH shells often lack ~/.local/bin, where the setup script
+# installs its shim; the node discovery also adds it to PATH.
+ensure_remote_node_path >/dev/null 2>&1 || true
 if command -v t3 >/dev/null 2>&1; then
   exec t3 "$@"
 fi
-# [fork:lockdown] This fork never installs t3 from the npm registry. The
-# remote server must be provisioned from a trusted source checkout: run
-# scripts/setup-remote-t3.sh from that checkout to build the server here and
-# install a t3 shim on PATH, then reconnect.
-printf 'Remote host has no t3 executable on PATH, and this T3 Code fork does not install %s from npm. Provision this host with scripts/setup-remote-t3.sh from your source checkout, then reconnect.\\n' @@T3_PACKAGE_SPEC@@ >&2
+# [fork:lockdown] This fork never downloads t3, from npm or from GitHub
+# releases. The remote server must be provisioned from a trusted source
+# checkout: run scripts/setup-remote-t3.sh from that checkout to build the
+# server here and install a t3 shim on PATH, then reconnect.
+printf 'Remote host has no t3 executable on PATH, and this T3 Code fork does not download t3 %s. Provision this host with scripts/setup-remote-t3.sh from your source checkout, then reconnect.\\n' "$T3_ARCHIVE_VERSION" >&2
 exit 1
 `;
 
@@ -454,16 +480,30 @@ if [ ! -f "$RUNNER_FILE" ] || ! cmp -s "$RUNNER_NEXT" "$RUNNER_FILE"; then
 fi
 mv "$RUNNER_NEXT" "$RUNNER_FILE"
 chmod 700 "$RUNNER_FILE"
-if ! ensure_remote_node_path; then
+T3_ARCHIVE_MODE=@@T3_ARCHIVE_MODE@@
+if [ "$T3_ARCHIVE_MODE" = "1" ]; then
+  # The t3 executable ships the helpers below; the remote needs no separate
+  # Node. Resolving the runner once here surfaces a missing provisioned t3
+  # before the port and readiness probes rely on it.
+  "$RUNNER_FILE" --version >/dev/null
+elif ! ensure_remote_node_path; then
   printf 'Remote host is missing node on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
   exit 1
 fi
 pick_port() {
+  if [ "$T3_ARCHIVE_MODE" = "1" ]; then
+    "$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE" "@@T3_DEFAULT_REMOTE_PORT@@" "@@T3_REMOTE_PORT_SCAN_WINDOW@@"
+    return
+  fi
   node - "$PORT_FILE" "@@T3_DEFAULT_REMOTE_PORT@@" "@@T3_REMOTE_PORT_SCAN_WINDOW@@" <<'NODE'
 @@T3_PICK_PORT_SCRIPT@@
 NODE
 }
 wait_ready() {
+  if [ "$T3_ARCHIVE_MODE" = "1" ]; then
+    "$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT" "$1" "@@T3_READY_PROBE_TIMEOUT_MS@@"
+    return
+  fi
   node - "$REMOTE_PORT" "$1" "@@T3_READY_PROBE_TIMEOUT_MS@@" <<'NODE'
 @@T3_WAIT_READY_SCRIPT@@
 NODE
@@ -477,6 +517,10 @@ wait_for_pid_exit() {
   done
 }
 resolve_default_runtime_port() {
+  if [ "$T3_ARCHIVE_MODE" = "1" ]; then
+    "$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"
+    return
+  fi
   node - "$DEFAULT_RUNTIME_FILE" <<'NODE'
 const fs = require("node:fs");
 const runtimePath = process.argv[2] ?? "";
@@ -563,7 +607,11 @@ fi
 if [ -z "$REMOTE_PORT" ]; then
   REMOTE_PORT="$(pick_port)" || true
   if [ -z "$REMOTE_PORT" ]; then
-    printf 'Failed to find an available port on the remote host. Ensure node is available on PATH.\\n' >&2
+    if [ "$T3_ARCHIVE_MODE" = "1" ]; then
+      printf 'Failed to find an available port on the remote host.\\n' >&2
+    else
+      printf 'Failed to find an available port on the remote host. Ensure node is available on PATH.\\n' >&2
+    fi
     exit 1
   fi
   nohup env T3CODE_NO_BROWSER=1 "$RUNNER_FILE" serve --host 127.0.0.1 --port "$REMOTE_PORT" --base-dir "$DEFAULT_SERVER_HOME" >>"$LOG_FILE" 2>&1 < /dev/null &
@@ -631,13 +679,43 @@ if [ -f "$LOG_FILE" ]; then
 fi
 `;
 
+export class SshInvalidArchiveVersionError extends Schema.TaggedError<SshInvalidArchiveVersionError>()(
+  "SshInvalidArchiveVersionError",
+  { archiveVersion: Schema.String },
+) {
+  override get message(): string {
+    return `'${this.archiveVersion}' is not an exact t3 version and cannot name a runtime directory.`;
+  }
+}
+
+// The version becomes a directory name the runner removes and recreates, so
+// it must be one exact SemVer segment: no separators, no `..`, no shell
+// metacharacters beyond what SemVer allows.
+const EXACT_ARCHIVE_VERSION =
+  /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+
+export class SshMissingRunnerError extends Schema.TaggedError<SshMissingRunnerError>()(
+  "SshMissingRunnerError",
+  {},
+) {
+  override get message(): string {
+    return "A remote t3 runner needs an archive version or a node script path.";
+  }
+}
+
 export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string {
-  const packageSpec = shellSingleQuote(input?.packageSpec?.trim() || "t3@latest");
   const nodeScriptPath = input?.nodeScriptPath?.trim() || "";
+  const archiveVersion = input?.archiveVersion?.trim() || "";
+  if (nodeScriptPath === "" && archiveVersion === "") {
+    throw new SshMissingRunnerError();
+  }
+  if (archiveVersion !== "" && !EXACT_ARCHIVE_VERSION.test(archiveVersion)) {
+    throw new SshInvalidArchiveVersionError({ archiveVersion });
+  }
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
-      T3_PACKAGE_SPEC: packageSpec,
       T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
+      T3_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
       T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     }),
   );
@@ -654,6 +732,7 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
 
 export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
+    T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
     T3_RUNNER_SCRIPT: stripTrailingNewlines(buildRemoteT3RunnerScript(input)),
     T3_PICK_PORT_SCRIPT: stripTrailingNewlines(REMOTE_PICK_PORT_SCRIPT),
@@ -706,7 +785,9 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
     const result = yield* runSshCommand(target, {
       remoteCommandArgs: ["sh", "-l", "-s", "--", remoteStateKey(target)],
       stdin: buildRemoteLaunchScript(runner),
-      timeoutMs: REMOTE_LAUNCH_TIMEOUT_MS,
+      timeoutMs: isNodeScriptRunner(runner)
+        ? REMOTE_LAUNCH_TIMEOUT_MS
+        : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS,
       ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
       ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
       ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -764,6 +845,9 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
     stdin: buildRemotePairingScript(target, runner),
+    // Pairing may be the first command on a cold remote, so it can install
+    // the archive on the way.
+    ...(isNodeScriptRunner(runner) ? {} : { timeoutMs: REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS }),
     ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
     ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
     ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -1494,13 +1578,8 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...sshTargetLogFields(resolvedTarget),
       key,
     });
-    const packageSpec = options.resolveCliPackageSpec?.();
     const runner =
-      options.resolveCliRunner === undefined
-        ? packageSpec === undefined
-          ? undefined
-          : { packageSpec }
-        : yield* options.resolveCliRunner;
+      options.resolveCliRunner === undefined ? undefined : yield* options.resolveCliRunner;
     yield* Effect.logDebug("ssh.environment.runner.resolved", {
       ...sshTargetLogFields(resolvedTarget),
       ...sshRunnerLogFields(runner),

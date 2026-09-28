@@ -187,6 +187,8 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
       model: slug,
       sessionId: state.sessionId,
       totals,
+      // Pi has no fast-mode tier to price.
+      fast: false,
       reportedCostUsd: reportedCostUsd(usage),
       dedupeKey: dedupeKeyFor(message["responseId"], parsed["id"], messageTimestampMs, tokens),
     };
@@ -210,6 +212,8 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
       model: state.model,
       sessionId: state.sessionId,
       totals,
+      // Pi has no fast-mode tier to price.
+      fast: false,
       reportedCostUsd: reportedCostUsd(usage),
       dedupeKey: dedupeKeyFor(undefined, parsed["id"], entryTimestampMs, tokens),
     };
