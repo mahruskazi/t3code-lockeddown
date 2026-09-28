@@ -131,10 +131,13 @@ Deliberately **not** touched (fallbacks handle the unknown driver kind):
   model catalog. While Pi 0.84.4 omits that metadata for `claude-fable-5-1`,
   the bundled extension adds the upstream beta header and ordered
   `claude-opus-5` / `claude-opus-4-8` fallbacks to that model's original
-  request. It defers completely when Pi's model catalog gains native fallback
-  metadata and leaves an already-configured request untouched. Because
-  Anthropic handles the choice within the request, completed tool calls are
-  never replayed and Pi records/prices the model that actually answered.
+  request. An explicit Anthropic beta header replaces Pi's inferred beta list,
+  so the extension also carries forward Pi's mid-conversation effort betas
+  when the model advertises that support. It defers completely when Pi's model
+  catalog gains native fallback metadata and leaves an already-configured
+  request untouched. Because Anthropic handles the choice within the request,
+  completed tool calls are never replayed and Pi records/prices the model that
+  actually answered.
 - **Thinking levels.** Pi's per-model scale is `off`, `minimal`, `low`,
   `medium`, `high`, `xhigh`, and `max`. `get_available_models` returns full Pi
   `Model`

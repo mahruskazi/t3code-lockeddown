@@ -46,6 +46,10 @@ const OPTIONS = ["Allow", "Always allow", "Deny"];
 const MAX_DETAIL_CHARS = 400;
 const ANTHROPIC_SERVER_SIDE_FALLBACK_BETA =
   "server-side-fallback-2026-07-01";
+const ANTHROPIC_MID_CONVERSATION_BETAS = [
+  "mid-conversation-output-config-2026-07-01",
+  "thinking-binding-controls-2026-08-01",
+];
 const ANTHROPIC_FALLBACK_MODELS = new Map([
   [
     "claude-fable-5-1",
@@ -144,6 +148,11 @@ export default function t3Approvals(pi) {
   pi.on("before_provider_headers", (event, ctx) => {
     if (!anthropicFallbacks(ctx)) return;
     addAnthropicBeta(event?.headers, ANTHROPIC_SERVER_SIDE_FALLBACK_BETA);
+    if (ctx.model.compat?.supportsMidConvoEffort === true) {
+      for (const beta of ANTHROPIC_MID_CONVERSATION_BETAS) {
+        addAnthropicBeta(event?.headers, beta);
+      }
+    }
   });
 
   pi.on("before_provider_request", (event, ctx) => {

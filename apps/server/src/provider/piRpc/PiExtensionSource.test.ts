@@ -21,7 +21,11 @@ function loadExtensionHandlers(approvalMode = "gated") {
 }
 
 const fableContext = {
-  model: { provider: "anthropic", id: "claude-fable-5-1" },
+  model: {
+    provider: "anthropic",
+    id: "claude-fable-5-1",
+    compat: { supportsMidConvoEffort: true },
+  },
 };
 
 describe("T3 Pi extension", () => {
@@ -32,7 +36,15 @@ describe("T3 Pi extension", () => {
     handlers.get("before_provider_headers")?.({ headers }, fableContext);
     handlers.get("before_provider_headers")?.({ headers }, fableContext);
 
-    assert.equal(headers["Anthropic-Beta"], "existing-beta,server-side-fallback-2026-07-01");
+    assert.equal(
+      headers["Anthropic-Beta"],
+      [
+        "existing-beta",
+        "server-side-fallback-2026-07-01",
+        "mid-conversation-output-config-2026-07-01",
+        "thinking-binding-controls-2026-08-01",
+      ].join(","),
+    );
 
     const payload = { model: "claude-fable-5-1", messages: [] };
     const result = handlers.get("before_provider_request")?.({ payload }, fableContext);
@@ -116,6 +128,18 @@ describe("T3 Pi extension", () => {
         nativeContext,
       ),
     );
+  });
+
+  it("does not enable mid-conversation effort for older Pi model definitions", () => {
+    const handlers = loadExtensionHandlers();
+    const headers: Record<string, string> = {};
+    const olderPiContext = {
+      model: { provider: "anthropic", id: "claude-fable-5-1" },
+    };
+
+    handlers.get("before_provider_headers")?.({ headers }, olderPiContext);
+
+    assert.equal(headers["anthropic-beta"], "server-side-fallback-2026-07-01");
   });
 
   it("keeps refusal fallback enabled for full-access threads", () => {
