@@ -1,12 +1,12 @@
 import type { DesktopBridge } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient } from "effect/http";
 
 import { __resetDesktopPrimaryAuthForTests } from "./desktopAuth";
 import { makePrimaryEnvironmentHttpLayer } from "./httpLayer";
 
-describe.sequential("primary environment HTTP layer", () => {
+describe("primary environment HTTP layer", { concurrent: false }, () => {
   afterEach(() => {
     __resetDesktopPrimaryAuthForTests();
     Reflect.deleteProperty(globalThis, "window");

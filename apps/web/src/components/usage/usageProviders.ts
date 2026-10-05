@@ -1,21 +1,11 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import {
-  AntigravityIcon,
-  ClaudeAI,
-  CursorIcon,
-  GrokIcon,
-  type Icon,
-  OpenAI,
-  OpenCodeIcon,
-} from "../Icons";
-// [fork:pi] Pi's mark is deliberately kept out of Icons.tsx.
-import { PiIcon } from "../PiIcon";
+import { ProviderDriverKind } from "@t3tools/contracts";
 
 type UsageProviderPresentation = {
   readonly label: string;
   readonly color: string;
-  readonly mark: Icon;
+  readonly driverKind: ProviderDriverKind;
 };
 
 /**
@@ -27,28 +17,32 @@ export const PROVIDER_PRESENTATION = {
   codex: {
     label: "Codex",
     color: "var(--contrast-foreground)",
-    mark: OpenAI,
+    driverKind: ProviderDriverKind.make("codex"),
   },
   claude: {
     label: "Claude Code",
     color: "#d97757",
-    mark: ClaudeAI,
+    driverKind: ProviderDriverKind.make("claudeAgent"),
   },
   grok: {
     label: "Grok Build",
     // Contrast-aware neutral between the Codex series and muted chart chrome.
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
-    mark: GrokIcon,
+    driverKind: ProviderDriverKind.make("grok"),
   },
-  cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
-  opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
-  antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
-  // [fork:pi]
-  pi: {
-    label: "Pi",
-    color: "#818cf8",
-    mark: PiIcon,
+  cursor: { label: "Cursor", color: "#8b8b8b", driverKind: ProviderDriverKind.make("cursor") },
+  opencode: {
+    label: "OpenCode",
+    color: "#5b9bbd",
+    driverKind: ProviderDriverKind.make("opencode"),
   },
+  antigravity: {
+    label: "Antigravity",
+    color: "#8c7bd1",
+    driverKind: ProviderDriverKind.make("antigravity"),
+  },
+  // [fork:pi] Upstream ships the Pi provider but no Usage-tab parser for it.
+  pi: { label: "Pi", color: "#818cf8", driverKind: ProviderDriverKind.make("pi") },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */

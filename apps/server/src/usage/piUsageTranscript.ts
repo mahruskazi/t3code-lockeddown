@@ -1,4 +1,4 @@
-// [fork:pi] Pi is a fork-local provider; this whole file is fork code.
+// [fork:pi] Upstream ships the Pi provider but no Usage-tab parser; this whole file is fork code.
 /**
  * Pure parser for Pi's on-disk session transcripts.
  *
@@ -188,7 +188,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
       sessionId: state.sessionId,
       totals,
       // Pi has no fast-mode tier to price.
-      fast: false,
+      speed: "standard",
       reportedCostUsd: reportedCostUsd(usage),
       dedupeKey: dedupeKeyFor(message["responseId"], parsed["id"], messageTimestampMs, tokens),
     };
@@ -213,7 +213,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
       sessionId: state.sessionId,
       totals,
       // Pi has no fast-mode tier to price.
-      fast: false,
+      speed: "standard",
       reportedCostUsd: reportedCostUsd(usage),
       dedupeKey: dedupeKeyFor(undefined, parsed["id"], entryTimestampMs, tokens),
     };

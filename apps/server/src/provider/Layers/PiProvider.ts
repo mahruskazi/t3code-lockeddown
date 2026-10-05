@@ -1,36 +1,40 @@
 /**
- * PiProvider — status probe, model catalog, and snapshot enrichment for the
- * Pi coding agent provider.
+ * PiProvider — snapshot/probe layer for the Pi coding agent.
  *
- * The probe runs `pi --version` for install/version detection, then a short
- * `pi --mode rpc --no-session` round-trip (`get_available_models`) for the
- * dynamic model catalog. Pi is bring-your-own-key across upstream providers,
- * so auth status stays `unknown` — the meaningful signal is whether the CLI
- * itself responds.
- *
- * [fork:pi] This module is fork-local. See docs/internals/fork-pi-provider.md.
- *
- * @module provider/Layers/PiProvider
+ * Health is probed with `pi --version`. Models, the user's default model, and
+ * the user's commands (extension slash commands, prompt templates, skills)
+ * are discovered through a short-lived ephemeral RPC session
+ * (`pi --mode rpc --no-session`), so everything the user configured in
+ * `~/.pi/agent` — custom providers, models.json entries, extensions, skills —
+ * shows up in T3 without any hardcoded catalog.
  */
 import {
-  type ModelCapabilities,
+  type CustomModelSetting,
   type PiSettings,
   type ServerProvider,
   type ServerProviderModel,
-  type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as DateTime from "effect/DateTime";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
-import { HttpClient } from "effect/unstable/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { createModelCapabilities } from "@t3tools/shared/model";
-import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { HttpClient } from "effect/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
+import {
+  buildPiRpcLaunch,
+  resolvePiLaunchArgs,
+} from "../../orchestration-v2/Adapters/piT3McpInjection.ts";
+import {
+  makePiRpcConnection,
+  piRecordField as recordField,
+  piRecordString as recordString,
+} from "../../orchestration-v2/Adapters/PiRpc.ts";
 import {
   buildServerProvider,
   isCommandMissingCause,
@@ -44,120 +48,140 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "../providerMaintenance.ts";
 import {
-  clampPiThinkingLevel,
-  parsePiAvailableModels,
-  parsePiAvailableSkills,
-  parsePiSessionState,
-  PI_THINKING_LEVEL_DESCRIPTIONS,
-  PI_THINKING_LEVEL_LABELS,
-  PI_THINKING_LEVEL_OPTION_ID,
-  type PiCatalogModel,
-  type PiThinkingLevel,
-} from "../piRpc/PiRpcModel.ts";
-import { makePiRpcProcess } from "../piRpc/PiRpcProcess.ts";
+  EMPTY_PI_MODEL_CAPABILITIES,
+  thinkingCapabilitiesForPiModel,
+} from "./piThinkingCapabilities.ts";
+import {
+  parsePiDiscoveredCommands,
+  withPiBuiltinSlashCommands,
+  type PiDiscoveredCommands,
+} from "../PiCommands.ts";
 
 const PI_PRESENTATION = {
   displayName: "Pi",
-  badgeLabel: "Early Access",
   showInteractionModeToggle: false,
+  supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
+  // The adapter reports context usage from Pi's streaming usage while a
+  // turn runs, so clients can reserve the meter before the first settle.
+  reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
 } as const;
 
-const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
-  optionDescriptors: [],
-});
-
-/**
- * Fallback level set for models we could not inspect: everything Pi offers on
- * a reasoning model that declares no `thinkingLevelMap`. `xhigh`/`max` stay
- * out, matching Pi's rule that a model must map them explicitly.
- *
- * Used for the built-in entry and for custom slugs the catalog did not cover.
- * Pi clamps anything it cannot honour, so an over-offered level degrades to
- * the nearest supported one rather than failing the turn.
- */
-const DEFAULT_PI_THINKING_LEVELS: ReadonlyArray<PiThinkingLevel> = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-];
-
 const VERSION_PROBE_TIMEOUT_MS = 4_000;
-const PI_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
-
+const PI_RPC_DISCOVERY_TIMEOUT_MS = 15_000;
 /**
- * Build the thinking-level picker for one model. A model with a single level
- * (`["off"]` — Pi's answer for anything without reasoning support) gets no
- * descriptor at all, so the UI shows a control only where there is a real
- * choice to make.
- *
- * `sessionDefaultLevel` is Pi's own current level, read from `get_state`, so
- * the picker opens on whatever the operator's Pi settings already default to
- * (`defaultThinkingLevel`) instead of a value we invented.
+ * get_entries arrived in 0.80.3 and agent_settled landed in source at 0.80.4.
+ * Version 0.80.5 was the first published package containing both hooks. T3
+ * needs them for rollback boundaries and reliable turn terminalization.
  */
-export function buildPiModelCapabilities(
-  thinkingLevels: ReadonlyArray<PiThinkingLevel>,
-  sessionDefaultLevel?: PiThinkingLevel | undefined,
-): ModelCapabilities {
-  if (thinkingLevels.length < 2) {
-    return EMPTY_CAPABILITIES;
-  }
-  const defaultLevel = sessionDefaultLevel
-    ? clampPiThinkingLevel(sessionDefaultLevel, thinkingLevels)
-    : undefined;
-  return createModelCapabilities({
-    optionDescriptors: [
-      {
-        id: PI_THINKING_LEVEL_OPTION_ID,
-        label: "Thinking",
-        type: "select",
-        options: thinkingLevels.map((level) => ({
-          id: level,
-          label: PI_THINKING_LEVEL_LABELS[level],
-          description: PI_THINKING_LEVEL_DESCRIPTIONS[level],
-          ...(level === defaultLevel ? { isDefault: true } : {}),
-        })),
-        ...(defaultLevel ? { currentValue: defaultLevel } : {}),
-      },
-    ],
-  });
+export const MINIMUM_PI_VERSION = "0.80.5";
+
+/** Deferring to the user's own settings.json default model. */
+const PI_DEFAULT_MODEL: ServerProviderModel = {
+  slug: "default",
+  name: "Pi default",
+  isCustom: false,
+  capabilities: EMPTY_PI_MODEL_CAPABILITIES,
+};
+
+interface PiDiscovery extends PiDiscoveredCommands {
+  readonly models: ReadonlyArray<ServerProviderModel>;
+  readonly authenticated: boolean;
 }
 
-const PI_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
-  {
-    slug: "anthropic/claude-sonnet-5",
-    name: "Claude Sonnet 5",
-    isCustom: false,
-    capabilities: buildPiModelCapabilities(DEFAULT_PI_THINKING_LEVELS),
-  },
-];
-
-export function piModelsFromSettings(
-  customModels: ReadonlyArray<string> | undefined,
-  builtInModels: ReadonlyArray<ServerProviderModel> = PI_BUILT_IN_MODELS,
-  sessionDefaultLevel?: PiThinkingLevel | undefined,
+function piModelsFromSettings(
+  customModels: ReadonlyArray<CustomModelSetting> | undefined,
+  discovered: ReadonlyArray<ServerProviderModel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(
-    builtInModels,
+    [PI_DEFAULT_MODEL, ...discovered],
     customModels ?? [],
-    buildPiModelCapabilities(DEFAULT_PI_THINKING_LEVELS, sessionDefaultLevel),
+    EMPTY_PI_MODEL_CAPABILITIES,
   );
 }
 
-/** Map one discovered catalog entry into a snapshot model. */
-export function piServerProviderModel(
-  model: PiCatalogModel,
-  sessionDefaultLevel?: PiThinkingLevel | undefined,
-): ServerProviderModel {
-  return {
-    slug: model.slug,
-    name: model.name,
-    isCustom: false,
-    capabilities: buildPiModelCapabilities(model.thinkingLevels, sessionDefaultLevel),
-  };
+function parseDiscoveredModels(
+  data: unknown,
+  defaultThinkingLevel: unknown,
+): ReadonlyArray<ServerProviderModel> {
+  const models = recordField(data, "models");
+  if (!Array.isArray(models)) return [];
+  const seen = new Set<string>();
+  const parsed: Array<ServerProviderModel> = [];
+  for (const model of models) {
+    const provider = recordString(model, "provider");
+    const id = recordString(model, "id");
+    if (provider === undefined || id === undefined) continue;
+    const slug = `${provider}/${id}`;
+    if (seen.has(slug)) continue;
+    seen.add(slug);
+    parsed.push({
+      slug,
+      name: recordString(model, "name") ?? slug,
+      isCustom: false,
+      capabilities: thinkingCapabilitiesForPiModel(model, defaultThinkingLevel),
+    });
+  }
+  return parsed;
 }
+
+const discoverPiViaRpc = (
+  piSettings: PiSettings,
+  environment: NodeJS.ProcessEnv,
+  launchArgs: ReadonlyArray<string>,
+  cwd?: string,
+) =>
+  Effect.gen(function* () {
+    const launch = buildPiRpcLaunch({
+      launchArgs,
+      environment,
+      mcpSession: undefined,
+      extensionPath: undefined,
+      ephemeral: true,
+    });
+    const connection = yield* makePiRpcConnection({
+      command: piSettings.binaryPath || "pi",
+      args: launch.args,
+      cwd,
+      env: launch.env,
+    });
+    yield* Stream.fromQueue(connection.events).pipe(
+      Stream.runDrain,
+      Effect.ignore,
+      Effect.forkScoped,
+    );
+    const stateData = yield* connection.request({ type: "get_state" });
+    const modelsData = yield* connection.request({ type: "get_available_models" });
+    const commandsData = yield* connection
+      .request({ type: "get_commands" })
+      .pipe(Effect.orElseSucceed(() => undefined));
+    const discoveredModels = parseDiscoveredModels(
+      modelsData,
+      recordString(stateData, "thinkingLevel"),
+    );
+    const { slashCommands, skills } = parsePiDiscoveredCommands(commandsData);
+    return {
+      models: discoveredModels,
+      slashCommands: withPiBuiltinSlashCommands(slashCommands),
+      skills,
+      authenticated: discoveredModels.length > 0,
+    } satisfies PiDiscovery;
+  }).pipe(Effect.scoped);
+
+const runPiVersionCommand = (piSettings: PiSettings, environment: NodeJS.ProcessEnv) =>
+  Effect.gen(function* () {
+    const command = piSettings.binaryPath || "pi";
+    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
+      env: environment,
+    });
+    return yield* spawnAndCollect(
+      command,
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        env: environment,
+        shell: spawnCommand.shell,
+      }),
+    );
+  });
 
 export function buildInitialPiProviderSnapshot(
   piSettings: PiSettings,
@@ -165,7 +189,6 @@ export function buildInitialPiProviderSnapshot(
   return Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     const models = piModelsFromSettings(piSettings.customModels);
-
     if (!piSettings.enabled) {
       return buildServerProvider({
         presentation: PI_PRESENTATION,
@@ -181,7 +204,6 @@ export function buildInitialPiProviderSnapshot(
         },
       });
     }
-
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: true,
@@ -198,79 +220,10 @@ export function buildInitialPiProviderSnapshot(
   });
 }
 
-const runPiVersionCommand = (
-  piSettings: PiSettings,
-  environment: NodeJS.ProcessEnv = process.env,
-) =>
-  Effect.gen(function* () {
-    const command = piSettings.binaryPath || "pi";
-    const spawnCommand = yield* resolveSpawnCommand(command, ["--version"], {
-      env: environment,
-    });
-    return yield* spawnAndCollect(
-      command,
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        env: environment,
-        shell: spawnCommand.shell,
-      }),
-    );
-  });
-
-const discoverPiCatalog = (piSettings: PiSettings, environment: NodeJS.ProcessEnv = process.env) =>
-  Effect.gen(function* () {
-    const rpc = yield* makePiRpcProcess({
-      binaryPath: piSettings.binaryPath,
-      args: ["--mode", "rpc", "--no-session"],
-      cwd: process.cwd(),
-      env: environment,
-    });
-    const [modelsResponse, skills, sessionDefaultLevel] = yield* Effect.all(
-      [
-        rpc.request(
-          { type: "get_available_models" },
-          { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
-        ),
-        rpc
-          .request(
-            { type: "get_commands" },
-            { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
-          )
-          .pipe(
-            Effect.map((response) => parsePiAvailableSkills(response.data)),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Pi skill discovery failed", {
-                errorTag: causeErrorTag(cause),
-              }).pipe(Effect.as<ReadonlyArray<ServerProviderSkill>>([])),
-            ),
-          ),
-        // Pi's own current level, so the picker opens on the operator's
-        // `defaultThinkingLevel` rather than a value we chose. Optional: a
-        // missing default just leaves the descriptor without a currentValue.
-        rpc
-          .request(
-            { type: "get_state" },
-            { timeout: Duration.millis(PI_MODEL_DISCOVERY_TIMEOUT_MS) },
-          )
-          .pipe(
-            Effect.map((response) => parsePiSessionState(response.data).thinkingLevel),
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Pi thinking-level default discovery failed", {
-                errorTag: causeErrorTag(cause),
-              }).pipe(Effect.as<PiThinkingLevel | undefined>(undefined)),
-            ),
-          ),
-      ],
-      { concurrency: "unbounded" },
-    );
-    const models = parsePiAvailableModels(modelsResponse.data).map((model) =>
-      piServerProviderModel(model, sessionDefaultLevel),
-    );
-    return { models, skills, sessionDefaultLevel } as const;
-  }).pipe(Effect.scoped);
-
 export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function* (
   piSettings: PiSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  cwd?: string,
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = piModelsFromSettings(piSettings.customModels);
@@ -298,9 +251,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
 
   if (Result.isFailure(versionResult)) {
     const error = versionResult.failure;
-    yield* Effect.logWarning("Pi CLI health check failed.", {
-      errorTag: error._tag,
-    });
+    yield* Effect.logWarning("Pi CLI health check failed.", { errorTag: error._tag });
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -312,7 +263,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         status: "error",
         auth: { status: "unknown" },
         message: isCommandMissingCause(error)
-          ? "Pi CLI (`pi`) is not installed or not on PATH."
+          ? "Pi CLI (`pi`) is not installed or not on PATH. Install with `npm install -g @earendil-works/pi-coding-agent`."
           : "Failed to execute Pi CLI health check.",
       },
     });
@@ -337,11 +288,6 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const versionOutput = versionResult.success.value;
   const version = parseGenericCliVersion(`${versionOutput.stdout}\n${versionOutput.stderr}`);
   if (versionOutput.code !== 0) {
-    yield* Effect.logWarning("Pi CLI version probe exited with a non-zero status.", {
-      exitCode: versionOutput.code,
-      stdoutLength: versionOutput.stdout.length,
-      stderrLength: versionOutput.stderr.length,
-    });
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -357,12 +303,63 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     });
   }
 
-  const discoveryExit = yield* discoverPiCatalog(piSettings, environment).pipe(
-    Effect.timeoutOption(PI_MODEL_DISCOVERY_TIMEOUT_MS + 5_000),
-    Effect.exit,
-  );
+  if (version === null) {
+    return buildServerProvider({
+      presentation: PI_PRESENTATION,
+      enabled: piSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version: null,
+        status: "error",
+        auth: { status: "unknown" },
+        message: `T3 Code could not determine the Pi version. Pi ${MINIMUM_PI_VERSION} or newer is required.`,
+      },
+    });
+  }
+
+  if (compareSemverVersions(version, MINIMUM_PI_VERSION) < 0) {
+    return buildServerProvider({
+      presentation: PI_PRESENTATION,
+      enabled: piSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: `Pi ${version} is unsupported. Update to Pi ${MINIMUM_PI_VERSION} or newer.`,
+      },
+    });
+  }
+
+  const resolvedLaunchArgs = resolvePiLaunchArgs(piSettings.launchArgs);
+  if (!resolvedLaunchArgs.ok) {
+    return buildServerProvider({
+      presentation: PI_PRESENTATION,
+      enabled: piSettings.enabled,
+      checkedAt,
+      models: fallbackModels,
+      probe: {
+        installed: true,
+        version,
+        status: "error",
+        auth: { status: "unknown" },
+        message: resolvedLaunchArgs.message,
+      },
+    });
+  }
+
+  const discoveryExit = yield* discoverPiViaRpc(
+    piSettings,
+    environment,
+    resolvedLaunchArgs.args,
+    cwd,
+  ).pipe(Effect.timeoutOption(PI_RPC_DISCOVERY_TIMEOUT_MS), Effect.exit);
   if (Exit.isFailure(discoveryExit)) {
-    yield* Effect.logWarning("Pi model discovery failed", {
+    yield* Effect.logWarning("Pi RPC discovery failed.", {
       errorTag: causeErrorTag(discoveryExit.cause),
     });
     return buildServerProvider({
@@ -375,14 +372,12 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version,
         status: "ready",
         auth: { status: "unknown" },
-        message: "Pi CLI is installed, but model discovery failed. Using the built-in model list.",
+        message:
+          "Pi is available, but T3 Code could not refresh its models and commands. The live session will retry startup.",
       },
     });
   }
   if (Option.isNone(discoveryExit.value)) {
-    yield* Effect.logWarning(
-      `Pi model discovery timed out after ${PI_MODEL_DISCOVERY_TIMEOUT_MS}ms.`,
-    );
     return buildServerProvider({
       presentation: PI_PRESENTATION,
       enabled: piSettings.enabled,
@@ -394,28 +389,31 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         status: "ready",
         auth: { status: "unknown" },
         message:
-          "Pi CLI is installed, but model discovery timed out. Using the built-in model list.",
+          "Pi is available, but model and command discovery needs interactive input. The live session will handle it.",
       },
     });
   }
 
-  const { models: discoveredModels, skills, sessionDefaultLevel } = discoveryExit.value.value;
-  const models =
-    discoveredModels.length > 0
-      ? piModelsFromSettings(piSettings.customModels, discoveredModels, sessionDefaultLevel)
-      : fallbackModels;
-
+  const discovery = discoveryExit.value.value;
+  const models = piModelsFromSettings(piSettings.customModels, discovery.models);
   return buildServerProvider({
     presentation: PI_PRESENTATION,
     enabled: piSettings.enabled,
     checkedAt,
     models,
-    skills,
+    slashCommands: discovery.slashCommands,
+    skills: discovery.skills,
     probe: {
       installed: true,
       version,
-      status: "ready",
-      auth: { status: "unknown" },
+      status: discovery.authenticated ? "ready" : "warning",
+      auth: { status: discovery.authenticated ? "authenticated" : "unauthenticated", type: "pi" },
+      ...(discovery.authenticated
+        ? {}
+        : {
+            message:
+              "Pi has no usable models. Run `pi` in a terminal and use /login, or configure an API key in ~/.pi/agent.",
+          }),
     },
   });
 });
@@ -428,7 +426,6 @@ export const enrichPiSnapshot = (input: {
   readonly httpClient: HttpClient.HttpClient;
 }): Effect.Effect<void> => {
   const { snapshot, publishSnapshot } = input;
-
   return enrichProviderSnapshotWithVersionAdvisory(snapshot, input.maintenanceCapabilities, {
     enableProviderUpdateChecks: input.enableProviderUpdateChecks,
   }).pipe(

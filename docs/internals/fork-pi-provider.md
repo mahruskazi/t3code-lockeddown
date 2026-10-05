@@ -1,197 +1,43 @@
-# Fork: Pi provider
+# Fork: Pi usage on the Usage tab
 
-> Fork-local. This driver integrates the [Pi coding agent](https://pi.dev)
-> (`pi --mode rpc`) as a T3 Code provider. It is not upstream; this document
-> exists so pulling upstream stays cheap.
-
-## Design rule
-
-All substantial logic lives in **new files** (never conflict on upstream
-merges). Every edit to a shared upstream file is a minimal, append-only block
-tagged with a `// [fork:pi]` marker comment. When an upstream merge conflicts,
-the resolution is mechanical: keep upstream's version of the surrounding code
-and re-apply the small `[fork:pi]` block.
+> Fork-local. Upstream ships the Pi provider itself
+> ([adapter](../../apps/server/src/orchestration-v2/Adapters/PiAdapterV2.ts)); this fork used to
+> carry its own driver and dropped it when upstream's landed. What remains is the one thing upstream
+> does not do: count Pi's tokens and cost on the Usage tab.
 
 ```
 git grep -n "fork:pi"   # every fork touch point, at any time
 ```
 
-## New files (no merge risk)
+## What the fork adds
 
-| File                                                  | Role                                                                                                                                                                                     |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/server/src/provider/piRpc/PiRpcModel.ts`        | Pure protocol model: JSONL line classification, model slugs, session state, resume cursor, deltas, usage, tool events, agent settlement, extension-UI + `t3-approval:v1:` marker parsing |
-| `apps/server/src/provider/piRpc/PiRpcProcess.ts`      | `pi --mode rpc` child-process transport: spawn, LF-only JSONL pump, request/response correlation, single-consumer event queue, in-band exit signalling                                   |
-| `apps/server/src/provider/piRpc/PiExtensionSource.ts` | Embedded T3 runtime Pi extension (approval gating and targeted Anthropic refusal fallback) + materializer, written under `<stateDir>/pi/` and loaded via `pi -e`                         |
-| `apps/server/src/provider/Layers/PiAdapter.ts`        | Provider adapter: sessions, turns/steering, interrupts, approvals, user-input bridging, token usage, runtime events                                                                      |
-| `apps/server/src/provider/Layers/PiProvider.ts`       | Status probe (`pi --version`), dynamic model catalog (`get_available_models`), snapshot enrichment                                                                                       |
-| `apps/server/src/provider/Drivers/PiDriver.ts`        | Driver bundle (adapter + snapshot + text generation + extension materialization)                                                                                                         |
-| `apps/server/src/provider/Services/PiAdapter.ts`      | Adapter shape interface                                                                                                                                                                  |
-| `apps/server/src/textGeneration/PiTextGeneration.ts`  | Commit/PR/branch/title generation via one-shot `--no-session` runs                                                                                                                       |
-| `apps/server/scripts/pi-mock-rpc-agent.ts`            | Mock `pi --mode rpc` for tests                                                                                                                                                           |
-| `apps/server/src/provider/piRpc/PiRpcModel.test.ts`   | Protocol model unit tests                                                                                                                                                                |
-| `apps/server/src/provider/Layers/PiAdapter.test.ts`   | Adapter integration tests against the mock agent                                                                                                                                         |
-| `apps/server/src/provider/Layers/PiProvider.test.ts`  | Snapshot capability tests (thinking-level pickers)                                                                                                                                       |
-| `apps/web/src/components/PiIcon.tsx`                  | π provider icon (kept out of `Icons.tsx` deliberately)                                                                                                                                   |
-| `docs/internals/fork-pi-provider.md`                  | This document                                                                                                                                                                            |
+The Usage page scans the provider CLIs' own session files, so Pi needs a parser rather than anything
+written at runtime. Pi appends JSONL to `<sessionsDir>/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`
+(`~/.pi/agent/sessions` by default, moved by `PI_CODING_AGENT_SESSION_DIR` or
+`PI_CODING_AGENT_DIR`; see [piSessionsDir.ts](../../apps/server/src/usage/piSessionsDir.ts)). Each
+assistant entry already carries provider, model, an ISO timestamp, the token breakdown, and a cost
+Pi computed from the model's own declared rates. That cost is preferred over the LiteLLM table: it
+is the only thing that prices locally hosted and custom models, and it honours tiered rates the
+table flattens. Compaction and branch-summary entries bill for a real call, so they count too,
+attributed to whichever model was last in use. Terminal `pi` runs land in the tab alongside
+T3-driven ones, and existing history counts immediately.
 
-## Upstream files touched (all marked `[fork:pi]`)
+Forking copies entries verbatim into the new file, so records de-duplicate on the provider's
+response id when there is one, and otherwise on the entry id plus the message instant and token
+total. Pi shortens entry ids to eight characters and only checks for collisions within one file.
 
-| File                                                             | Edit                                                                                                                            |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/contracts/src/settings.ts`                             | `PiSettings` schema block; `providers.pi` struct entry; `PiSettingsPatch` + patch entry                                         |
-| `packages/contracts/src/model.ts`                                | `PI_DRIVER_KIND`; entries in `DEFAULT_MODEL_BY_PROVIDER`, `DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER`, `PROVIDER_DISPLAY_NAMES` |
-| `packages/contracts/src/providerRuntime.ts`                      | `pi.rpc` / `pi.rpc.extension` raw-source literals                                                                               |
-| `apps/server/src/provider/builtInDrivers.ts`                     | Driver import, env union member, `BUILT_IN_DRIVERS` entry                                                                       |
-| `apps/server/src/provider/Layers/ProviderRegistry.test.ts`       | Two provider-enumeration expectations (`pi` disabled in one fixture; `pi` in the sorted instance list)                          |
-| `apps/web/src/session-logic.ts`                                  | `PROVIDER_OPTIONS` entry                                                                                                        |
-| `apps/web/src/components/settings/providerDriverMeta.ts`         | Client definition entry + imports                                                                                               |
-| `apps/web/src/components/chat/providerIconUtils.ts`              | Icon map entry + import                                                                                                         |
-| `apps/web/src/components/settings/ProviderModelsSection.tsx`     | Custom-model placeholder entry                                                                                                  |
-| `apps/mobile/src/components/ProviderIcon.tsx`                    | π icon branch                                                                                                                   |
-| `packages/contracts/src/usage.ts`                                | `pi` in `UsageProviderKind`; provider variants are additive upstream now, so no contract version bump goes with it              |
-| `apps/server/src/usage/usageTranscriptReader.ts`                 | Pi branch in the per-line reducer                                                                                               |
-| `apps/server/src/usage/usageTranscripts.ts`                      | Comment noting Pi gates in the reader instead                                                                                   |
-| `apps/server/src/usage/UsageService.ts`                          | Pi entry in `resolveTranscriptDirs`                                                                                             |
-| `apps/web/src/components/usage/usageProviders.ts`                | Pi presentation entry                                                                                                           |
-| `apps/web/src/components/settings/AddProviderInstanceDialog.tsx` | Drops upstream's "Pi Agent — coming soon" placeholder                                                                           |
-| `apps/server/src/provider/providerCompatibility.test.ts`         | Exempts `pi` from the bundled compatibility-policy check; upstream's manifest has no Pi policy                                  |
-| `apps/mobile/src/features/usage/usageProviders.ts`               | Pi label, colour, and stack order                                                                                               |
-| `docs/internals/providers.md`                                    | Driver table row + fork note                                                                                                    |
+One-shot `--no-session` runs (commit and PR message generation) write no session file and are not
+counted.
 
-Deliberately **not** touched (fallbacks handle the unknown driver kind):
-`contextWindow.ts` (title-cases unknown kinds → "Pi"),
-`MODEL_SLUG_ALIASES_BY_PROVIDER` (missing entry → `{}`),
-`composerDraftStore.ts` provider literal lists (grok is skipped there too),
-`TextGeneration.ts` `TextGenerationProvider` union (unused structurally),
-`DiagnosticsSettings.tsx` process classifier.
+The parser lives in [piUsageTranscript.ts](../../apps/server/src/usage/piUsageTranscript.ts). The
+shared files it touches are `packages/contracts/src/usage.ts` (`pi` in `UsageProviderKind`),
+`usageTranscriptReader.ts`, `usageTranscripts.ts` and `UsageService.ts` on the server, and the web
+and mobile `usageProviders.ts`. Each edit is a small block marked `[fork:pi]`; on an upstream
+conflict, take upstream's hunk and re-add the block. If upstream ever counts Pi itself, delete all
+of it.
 
-## Updating this fork from upstream
+## pi-config
 
-1. `git merge upstream/main` (or rebase — the fork commits are additive).
-2. Conflicts, if any, land on the `[fork:pi]` blocks above. Take upstream's
-   hunk, re-add the marked block at the equivalent append position.
-3. If upstream renamed a helper the new files import
-   (`providerSnapshot.ts`, `providerMaintenance.ts`, `makeManagedServerProvider.ts`,
-   `TextGenerationPrompts.ts`), the compiler will point at the Pi files;
-   follow whatever the Grok driver now does — PiDriver/PiProvider/PiTextGeneration
-   are deliberately shaped 1:1 after their Grok counterparts.
-4. Re-run: `vp run --filter t3 typecheck` and
-   `vp test run src/provider/piRpc src/provider/Layers/PiAdapter.test.ts src/provider/Layers/PiProvider.test.ts src/provider/Layers/ProviderRegistry.test.ts`
-   (from `apps/server`).
-
-## How the integration works
-
-- **Transport.** One `pi --mode rpc` process per thread session, JSONL over
-  stdio (LF-only framing per Pi's spec). Commands carry monotonic `t3-N` ids;
-  responses resolve pending deferreds; everything else feeds a single-consumer
-  event queue.
-- **Turns.** `sendTurn` writes `prompt` and blocks until the pump observes
-  `agent_settled`; `agent_end` records only the last low-level run outcome
-  because retries, queued messages, and extension-triggered continuations may
-  follow it. Every prompt carries `streamingBehavior: "steer"`: Pi ignores it
-  while idle and atomically queues the message if extension work starts before
-  command acceptance, so no separate busy-state check can race. Steering during
-  an active T3 turn remains folded into that turn. `interruptTurn` sends `abort`
-  and settles `cancelled` immediately.
-- **Approvals.** Pi runs tools without asking, so the bundled extension
-  (`PiExtensionSource.ts`) gates `bash`/`write`/`edit` behind a `select`
-  dialog whose title carries `t3-approval:v1:<json>`. In RPC mode that
-  surfaces as `extension_ui_request`; the adapter maps it to T3's
-  `request.opened`/`request.resolved` and answers with
-  `extension_ui_response` (`Allow` / `Always allow` / `Deny` / cancelled).
-  Full-access threads set `T3_PI_APPROVAL_MODE=off` and skip gating.
-  Foreign extension `select`/`confirm` dialogs degrade to T3 user-input
-  questions; `input`/`editor` dialogs are auto-cancelled (v1 limitation).
-- **Structured questions.** Pi's RPC mode cannot render `ctx.ui.custom()`.
-  Question extensions can instead emit a `select` dialog whose title starts
-  with `t3-user-input:v1:` followed by the JSON-encoded normalized questions.
-  The adapter renders one first-class T3 question card and returns the answer
-  map as the selected value prefixed with `t3-user-input-response:v1:`.
-- **Tool rendering.** Tool lifecycle events (`item.started/updated/completed`)
-  follow the shared client data conventions: `data` carries
-  `toolCallId`/`kind`/`command`/`path` (file changes only)/`rawInput`/
-  `rawOutput.content` (built by `buildPiToolCallData`), and titles/details come
-  from `deriveToolActivityPresentation` (`@t3tools/shared/toolActivity`), e.g.
-  "Ran command" instead of raw `bash`. Pi only sends args on
-  `tool_execution_start`, so the adapter caches them per `toolCallId` and
-  re-emits the full `data` on update/end (clients drop `data` from started
-  events and render from completed ones).
-- **Plans.** The pi-config `todo_write` tool's checklist (args on
-  `tool_execution_start`) is additionally emitted as `turn.plan.updated`
-  (same pattern as ClaudeAdapter's TodoWrite mapping), feeding the plan chip
-  and the sidebar "step N/M" working indicator. The tool row is preserved.
-- **Notifications.** Foreign extension `notify` events with `warning`/`error`
-  severity become `runtime.warning` work-log rows (bounded, consecutive
-  duplicates collapsed, per-session cap). `info` notifications and `t3-`
-  marker transports stay invisible.
-- **Models.** Pi models are `provider/modelId` slugs. The probe discovers the
-  catalog via `get_available_models`; `set_model` switches in-session. Pi
-  normally supplies Anthropic's server-side refusal fallback metadata from its
-  model catalog. While Pi 0.84.4 omits that metadata for `claude-fable-5-1`,
-  the bundled extension adds the upstream beta header and ordered
-  `claude-opus-5` / `claude-opus-4-8` fallbacks to that model's original
-  request. An explicit Anthropic beta header replaces Pi's inferred beta list,
-  so the extension also carries forward Pi's mid-conversation effort betas
-  when the model advertises that support. It defers completely when Pi's model
-  catalog gains native fallback metadata and leaves an already-configured
-  request untouched. Because Anthropic handles the choice within the request,
-  completed tool calls are never replayed and Pi records/prices the model that
-  actually answered.
-- **Thinking levels.** Pi's per-model scale is `off`, `minimal`, `low`,
-  `medium`, `high`, `xhigh`, and `max`. `get_available_models` returns full Pi
-  `Model`
-  objects, so the levels come off each entry's `reasoning` flag and
-  `thinkingLevelMap` (a level mapped to `null` is unsupported; `xhigh`/`max`
-  need an explicit mapping). That mirrors Pi's own `getSupportedThinkingLevels`
-  and keeps discovery to one round-trip — Pi's
-  `get_available_thinking_levels` answers only for the _current_ model, so
-  reading it per model would cost a `set_model` each. A model with one level
-  (`["off"]`, Pi's answer for anything without reasoning support) publishes no
-  descriptor, so the picker appears only where there is a choice. The probe
-  also reads `get_state` for Pi's own current level and uses it as the
-  descriptor's default, which is how the operator's `defaultThinkingLevel`
-  shows through. The adapter sends `set_thinking_level` **after** `set_model`,
-  never before: Pi recomputes the level on every model switch, so a switch
-  re-sends even an unchanged level.
-- **Resume.** Cursor `{schemaVersion: 1, sessionFile}` → `--session <file>`.
-  Session files stay in Pi's own session dir, so `pi` in a terminal sees the
-  same history.
-- **Context meter.** `message_update.usage` totals are tracked, then
-  `get_session_stats` supplies Pi's active post-compaction token count and model
-  context window. The combined snapshot is published as
-  `thread.token-usage.updated` on message end and turn settlement (not per
-  delta, to keep websocket volume down). This drives the per-thread meter only;
-  the Usage tab is fed separately, below.
-- **Usage tab.** The Usage page scans the provider CLIs' own session files, so
-  Pi needed a parser rather than anything new written at runtime. Pi appends
-  JSONL to `<sessionsDir>/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`
-  (`~/.pi/agent/sessions` by default, moved by `PI_CODING_AGENT_SESSION_DIR` or
-  `PI_CODING_AGENT_DIR`), and each assistant entry already carries provider,
-  model, an ISO timestamp, the token breakdown, and a cost Pi computed from the
-  model's own declared rates. That cost is preferred over our LiteLLM table:
-  it is the only thing that prices locally hosted and custom models, and it
-  honours tiered rates the table flattens. Compaction and branch-summary
-  entries bill for a real call, so they are counted too, attributed to
-  whichever model was last in use. Terminal `pi` runs land in the tab
-  alongside T3-driven ones, and existing history counts immediately.
-
-  Forking copies entries verbatim into the new file, so records de-duplicate on
-  the provider's response id when there is one, and otherwise on the entry id
-  plus the message instant and token total — Pi shortens entry ids to eight
-  characters and only checks for collisions within a single file.
-
-  One-shot `--no-session` runs (commit and PR message generation) write no
-  session file and so are not counted.
-
-- **Skills.** The provider probe reads `get_commands`, maps loaded skill
-  commands into the provider snapshot, and exposes them to the composer's `$`
-  picker.
-
-## Known limitations (v1)
-
-- No provider-side rollback (`thread/rollback` fails like Grok's; Pi's
-  `fork`/`get_entries` could support it later).
-- No MCP server passthrough to Pi.
-- Auth status reports `unknown` — Pi is bring-your-own-key via environment
-  variables; the probe only verifies the CLI runs.
+[`mahruskazi/pi-config`](https://github.com/mahruskazi/pi-config) holds the Pi extensions used here.
+They talk to upstream's adapter through its plain extension UI and the `T3_PI_RUNTIME_MODE`
+variable it sets; there is no T3-specific protocol left on either side.

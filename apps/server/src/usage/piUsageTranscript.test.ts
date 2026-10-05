@@ -1,4 +1,4 @@
-// [fork:pi] Pi is a fork-local provider; this whole file is fork code.
+// [fork:pi] Upstream ships the Pi provider but no Usage-tab parser; this whole file is fork code.
 import { describe, expect, it } from "@effect/vitest";
 
 import { initialPiScanState, parsePiLine, piLineMightMatter } from "./piUsageTranscript.ts";
