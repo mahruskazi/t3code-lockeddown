@@ -10,12 +10,10 @@ import * as Layer from "effect/Layer";
 import { createDpopProof, loadOrCreateDpopProofKeyPair } from "./dpop";
 import { managedRelayAccessTokenStore } from "./managedRelayTokenStore";
 
-const relayDpopSignerLayer = Layer.effect(
+const layerRelayDpopSigner = Layer.effect(
   ManagedRelay.ManagedRelayDpopSigner,
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    // Keeps the loaded key for the app's lifetime. A failed or interrupted
-    // load is not kept, so the next relay request loads it again.
     const proofKeyCache = yield* Cache.makeWith(
       () => loadOrCreateDpopProofKeyPair().pipe(Effect.provideService(Crypto.Crypto, crypto)),
       {
@@ -64,9 +62,9 @@ const relayDpopSignerLayer = Layer.effect(
   }),
 );
 
-export const managedRelayClientLayer = (relayUrl: string) =>
+export const layer = (relayUrl: string) =>
   ManagedRelay.layer({
     relayUrl,
     clientId: RelayMobileClientId,
     accessTokenStore: managedRelayAccessTokenStore,
-  }).pipe(Layer.provideMerge(relayDpopSignerLayer));
+  }).pipe(Layer.provideMerge(layerRelayDpopSigner));

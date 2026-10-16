@@ -9,8 +9,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { FetchHttpClient } from "effect/http";
 
-import { cryptoLayer } from "./dpop";
-import { managedRelayClientLayer } from "./managedRelayLayer";
+import * as Dpop from "./dpop";
+import * as ManagedRelayLayer from "./managedRelayLayer";
 
 vi.mock("expo-crypto", () => ({
   CryptoDigestAlgorithm: { SHA256: "SHA-256" },
@@ -49,13 +49,12 @@ describe("managed relay DPoP signer", () => {
       const failed = yield* Effect.flip(signer.thumbprint);
       assert.equal(failed._tag, "ManagedRelayDpopKeyLoadError");
 
-      // The failure was not kept: the next request reads the key store again.
       const thumbprint = yield* signer.thumbprint;
       assert.equal(yield* signer.thumbprint, thumbprint);
     }).pipe(
       Effect.provide(
-        managedRelayClientLayer("https://relay.example.test").pipe(
-          Layer.provide(Layer.mergeAll(FetchHttpClient.layer, cryptoLayer)),
+        ManagedRelayLayer.layer("https://relay.example.test").pipe(
+          Layer.provide(Layer.mergeAll(FetchHttpClient.layer, Dpop.layer)),
         ),
       ),
     ),

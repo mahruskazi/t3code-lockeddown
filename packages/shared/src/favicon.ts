@@ -1,10 +1,3 @@
-import { isPublicFaviconHost } from "./hostClassification.ts";
-
-/**
- * Mirrors Codex's generic Browser Use fallback: ask the page origin for its
- * conventional favicon and let the image element fall back to a browser glyph.
- * Chrome-backed tools can pass their tab's explicit favicon URL separately.
- */
 function faviconUrlForPage(rawUrl: string | null | undefined, _size = 32): string | null {
   if (!rawUrl || rawUrl.length > 4096) return null;
   try {
@@ -52,12 +45,6 @@ function explicitFaviconUrl(rawUrl: string | null | undefined): string | null {
   }
 }
 
-/**
- * Chooses a website icon for the app's resolved theme. Provider-supplied
- * variants mirror Codex's Chrome-selected favicon path. A small site-owned
- * fallback table covers websites whose conventional favicon is illegible in
- * one appearance without recoloring full-color icons.
- */
 export function toolActivityFaviconUrl(
   icon: {
     readonly pageUrl: string;
@@ -82,16 +69,13 @@ export function toolActivityFaviconUrl(
   );
 }
 
-/** Return a public favicon URL without disclosing private or reserved hosts. */
-export function faviconUrlForOrigin(rawUrl: string | null | undefined, size = 32): string | null {
-  if (!rawUrl) return null;
-  try {
-    const url = new URL(rawUrl);
-    if (!url.host) return null;
-    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    if (!isPublicFaviconHost(url.hostname)) return null;
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(url.host)}&sz=${size}`;
-  } catch {
-    return null;
-  }
+/**
+ * [fork:lockdown] Upstream resolves link and tab favicons through Google's
+ * favicon service, which sends Google every public hostname that appears in a
+ * chat link or browser tab. Agents write those links from the code they read,
+ * and a heuristic filter for internal names cannot tell which public names are
+ * confidential, so this fork shows no favicon instead. Tripwire: favicon.test.ts.
+ */
+export function faviconUrlForOrigin(_rawUrl: string | null | undefined, _size = 32): null {
+  return null;
 }

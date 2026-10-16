@@ -1,11 +1,6 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
-/**
- * Series and table order. The chart stacks providers from the bottom in this
- * order, so it also fixes which band sits on top of the bars.
- */
-// [fork:pi] `pi` stacks last.
 export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "codex",
   "claude",
@@ -23,16 +18,9 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   cursor: "Cursor",
   opencode: "OpenCode",
   antigravity: "Antigravity",
-  // [fork:pi]
   pi: "Pi",
 };
 
-/**
- * Claude's brand orange holds in both themes; Codex and Grok are neutrals and
- * must flip with the theme or their bars vanish against the matching background.
- * Pi's own mark is monochrome, so its band gets an indigo that stays legible
- * either way and cannot be confused with the Codex or Grok neutrals.
- */
 export function useProviderColors(): Record<UsageProviderKind, string> {
   const { themeAppearance: scheme } = useAppearancePreferences();
   return {
@@ -42,16 +30,10 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
     cursor: "#8b8b8b",
     opencode: "#5b9bbd",
     antigravity: "#8c7bd1",
-    // [fork:pi]
-    pi: "#818cf8",
+    pi: "#4d9f8a",
   };
 }
 
-/**
- * Neutral steps for cost and token mixes, so they never borrow a provider's
- * color. Matches the web steps: oklab mixes of the codex ink into the
- * background, above the 15 ΔE separation floor for adjacent segments.
- */
 export function useUsageMixColors() {
   const { themeAppearance: scheme } = useAppearancePreferences();
   const dark = scheme === "dark";

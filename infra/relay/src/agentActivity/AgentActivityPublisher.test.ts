@@ -10,7 +10,7 @@ import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
 import * as FcmDeliveries from "./FcmDeliveries.ts";
 import * as ApnsDeliveries from "./ApnsDeliveries.ts";
 
-const publisherLayer = AgentActivityPublisher.layer.pipe(
+const layerPublisher = AgentActivityPublisher.layer.pipe(
   Layer.provide(
     Layer.succeed(FcmDeliveries.FcmDeliveries, {
       enqueue: () => Effect.succeed(null),
@@ -225,7 +225,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          publisherLayer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(AgentActivityRows.AgentActivityRows, makeAgentActivityRows()),
@@ -298,7 +298,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          publisherLayer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -392,7 +392,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          publisherLayer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -450,8 +450,6 @@ describe("AgentActivityPublisher", () => {
           ok: true,
         },
       ]);
-      // Terminal states are persisted (and later pruned by the cron) so the
-      // finished thread can keep a Done row in later aggregates.
       expect(upserts).toEqual([
         {
           environmentPublicKey: "environment-public-key",
@@ -498,7 +496,7 @@ describe("AgentActivityPublisher", () => {
         });
       }).pipe(
         Effect.provide(
-          publisherLayer.pipe(
+          layerPublisher.pipe(
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(
@@ -610,7 +608,7 @@ describe("AgentActivityPublisher", () => {
           });
         }).pipe(
           Effect.provide(
-            publisherLayer.pipe(
+            layerPublisher.pipe(
               Layer.provide(
                 Layer.mergeAll(
                   Layer.succeed(
@@ -822,9 +820,6 @@ describe("makeAggregateState", () => {
       nowMs: hourMs,
     });
 
-    // An armed card never renders an empty state: recently finished threads
-    // keep Done content on it, and once they age out the aggregate becomes
-    // null and the delivery layer ends the card.
     expect(aggregate).toMatchObject({
       activeCount: 0,
       subtitle: "Agent work completed",

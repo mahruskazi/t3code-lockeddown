@@ -1,8 +1,9 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
 import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput } from "@t3tools/contracts";
+import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -16,7 +17,8 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
+import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
 
@@ -58,20 +60,18 @@ const requestFor = (
   ...overrides,
 });
 
-/**
- * Runs `body` against a service whose launches are pushed to `launches`;
- * `gate`, when given, holds each launch until the test releases it.
- */
 const withService = <A, E>(
   body: (input: {
     readonly service: ScheduledTaskService.ScheduledTaskService["Service"];
     readonly launches: Queue.Queue<LaunchInput>;
+    readonly secretsByRef: Map<string, string>;
   }) => Effect.Effect<A, E, never>,
   options: { readonly gate?: Deferred.Deferred<void>; readonly relayHookBaseUrl?: string } = {},
 ) =>
   Effect.gen(function* () {
     const launches = yield* Queue.unbounded<LaunchInput>();
-    const dependencies = Layer.mergeAll(
+    const secretsByRef = new Map<string, string>();
+    const layerDependencies = Layer.mergeAll(
       NodePlatformCrypto.layer,
       Scheduler.layer,
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
@@ -82,6 +82,15 @@ const withService = <A, E>(
           ),
       }),
       Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+      Layer.mock(SecretRequests.SecretRequests)({
+        consume: ({ ref }) => {
+          const value = secretsByRef.get(ref);
+          secretsByRef.delete(ref);
+          return value === undefined
+            ? Effect.fail(new SecretRequestError({ reason: "ref_unavailable" }))
+            : Effect.succeed(value);
+        },
+      }),
       Layer.succeed(
         ScheduledTaskService.ScheduledTaskWebhookOrigin,
         Effect.succeed({ relayHookBaseUrl: options.relayHookBaseUrl ?? null }),
@@ -89,9 +98,9 @@ const withService = <A, E>(
     );
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
-      return yield* body({ service, launches });
-    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(dependencies))));
-  }).pipe(Effect.provide(SqlitePersistenceMemory));
+      return yield* body({ service, launches, secretsByRef });
+    }).pipe(Effect.provide(ScheduledTaskService.layer.pipe(Layer.provide(layerDependencies))));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory));
 
 it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
   withService(({ service, launches }) =>
@@ -100,7 +109,6 @@ it.effect("dispatches exactly the rendered prompt and logs the delivery", () =>
       assert.equal(task.nextRunAt, null);
       assert.isDefined(task.webhook);
       assert.isTrue(task.webhook!.path.startsWith("/api/hooks/scheduled-task%3Ahook/"));
-      // Not linked to T3 Connect in tests.
       assert.equal(task.webhook!.url, null);
 
       const result = yield* service.triggerWebhook(requestFor(task));
@@ -220,7 +228,6 @@ it.effect("checks the configured signature and keeps the secret write-only", () 
       );
       assert.equal(signed._tag, "accepted");
 
-      // Saving without a secret keeps the stored one.
       const resaved = yield* service.upsert(
         yield* webhookTaskInput({
           schedule: {
@@ -268,7 +275,6 @@ it.effect("queues a burst of deliveries instead of dropping them", () =>
             results.map((result) => result._tag),
             ["accepted", "accepted", "accepted"],
           );
-          // Only the first is dispatching; the others wait their turn.
           yield* Queue.take(launches);
           yield* Deferred.succeed(gate, undefined);
           const rest = yield* Effect.all([Queue.take(launches), Queue.take(launches)]);
@@ -288,7 +294,6 @@ it.effect("rate limits a hook past 60 deliveries a minute", () =>
       );
       assert.equal(results.at(-2)?._tag, "disabled");
       assert.equal(results.at(-1)?._tag, "rate_limited");
-      // Further rejections in the same window are counted, not logged.
       yield* Effect.forEach([1, 2, 3], () => service.triggerWebhook(requestFor(task)));
       const outcomes = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries.map(
         (delivery) => delivery.outcome,
@@ -303,7 +308,6 @@ it.effect("a save carrying a stale token cannot undo a rotation", () =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput());
       const rotated = yield* service.rotateWebhookToken({ id: task.id });
-      // The editor was opened before the rotation and saves afterwards.
       const saved = yield* service.upsert(yield* webhookTaskInput({ title: "Edited" }));
       assert.equal(saved.task.webhook?.path, rotated.task.webhook?.path);
       assert.equal((yield* service.triggerWebhook(requestFor(task)))._tag, "not_found");
@@ -314,8 +318,6 @@ it.effect("a save carrying a stale token cannot undo a rotation", () =>
 it.effect("keeps the newest 50 deliveries when they share a timestamp", () =>
   withService(({ service }) =>
     Effect.gen(function* () {
-      // Paused, so each request is logged without starting a run. The test
-      // clock is frozen, so every delivery has the same received_at.
       const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
       const ids = yield* Effect.forEach(Array.from({ length: 55 }), (_, index) =>
         service.triggerWebhook(requestFor(task, { query: `n=${index}` })).pipe(Effect.as(index)),
@@ -395,7 +397,6 @@ it.effect.each(queuedDeliveryCases)(
             yield* Queue.take(launches);
             yield* apply(service, task.id);
             yield* Deferred.succeed(gate, undefined);
-            // The queued delivery is marked failed instead of launching.
             const deliveryId = queued._tag === "accepted" ? queued.deliveryId : undefined;
             let delivery = (yield* service.getWebhookDelivery({
               id: task.id,
@@ -431,7 +432,6 @@ it.effect("a save without a secret keeps a secret changed after it was read", ()
           schedule: { type: "webhook", signature: { ...signature, secret: "new" } },
         }),
       );
-      // A form opened before the change saves without sending a secret.
       yield* service.upsert(
         yield* webhookTaskInput({ title: "Edited", schedule: { type: "webhook", signature } }),
       );
@@ -459,13 +459,11 @@ it.effect("caps deliveries waiting behind a stuck run", () =>
           const { task } = yield* service.upsert(yield* webhookTaskInput());
           yield* service.triggerWebhook(requestFor(task));
           yield* Queue.take(launches);
-          // The cap counts the running delivery too: 19 more wait, the next is refused.
           const waiting = yield* Effect.forEach(Array.from({ length: 20 }), () =>
             service.triggerWebhook(requestFor(task)),
           );
           assert.equal(waiting.filter((result) => result._tag === "accepted").length, 19);
           assert.equal(waiting.at(-1)?._tag, "rate_limited");
-          // The refused request is not logged.
           const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
           assert.equal(logged.length, 20);
           yield* Deferred.succeed(gate, undefined);
@@ -479,7 +477,6 @@ it.effect("logs a body's first 64 KiB by bytes, not characters", () =>
   withService(({ service }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
-      // 30 000 three-byte characters: under 64 Ki characters, over 64 KiB.
       const text = "界".repeat(30_000);
       const body = new TextEncoder().encode(text);
       yield* service.triggerWebhook(requestFor(task, { body, bodyText: text }));
@@ -498,7 +495,6 @@ it.effect("counts the prompt as the provider does, without surrounding whitespac
   withService(({ service, launches }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput({ prompt: "{{body.text}}" }));
-      // Over the limit as sent, within it once the padding is trimmed.
       const text = `{"text":"${" ".repeat(1_000)}${"x".repeat(119_990)}${"\\n".repeat(1_000)}"}`;
       const result = yield* service.triggerWebhook(
         requestFor(task, { body: new TextEncoder().encode(text), bodyText: text }),
@@ -525,7 +521,6 @@ it.effect("does not start a run when the filled-in prompt is too long", () =>
       assert.equal(delivery.outcome, "dispatch_failed");
       assert.equal(delivery.error, "The filled-in prompt is too long.");
       assert.equal(delivery.renderedPrompt?.length, 64 * 1024);
-      // The queue slot was never taken: a normal delivery still runs.
       const ok = yield* service.triggerWebhook(requestFor(task));
       assert.equal(ok._tag, "accepted");
       yield* Queue.take(launches);
@@ -544,7 +539,6 @@ it.effect("a held request already delivered directly runs only once", () =>
         requestFor(task, { relayDeliveryId: "relay-1", receivedAt: "2026-10-04T10:00:00.000Z" }),
       );
       assert.equal(direct._tag, "accepted");
-      // Same delivery, answered the same way, but recorded as a duplicate.
       assert.deepEqual(replayed, { ...direct, outcome: "duplicate" } as typeof replayed);
       yield* Queue.take(launches);
       const logged = (yield* service.listWebhookDeliveries({ id: task.id })).deliveries;
@@ -557,10 +551,6 @@ it.effect("a held request whose sender hung up mid-request still runs", () =>
   withService(({ service, launches }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput());
-      // The relay times out and the request fiber is interrupted. A small
-      // operation budget makes the request yield often, so stepping the
-      // interrupt one yield later each time lands it at every point in the
-      // request (one takes about 40 yields), then the relay retries.
       for (let step = 0; step < 60; step++) {
         const request = requestFor(task, { relayDeliveryId: `hung-up-${step}` });
         const fiber = yield* service
@@ -571,11 +561,9 @@ it.effect("a held request whose sender hung up mid-request still runs", () =>
         const retried = yield* service.triggerWebhook(request);
         assert.equal(retried._tag, "accepted");
         const deliveryId = retried._tag === "accepted" ? retried.deliveryId : undefined;
-        // Logged and run exactly once, whether or not the first attempt got through.
         yield* service.getWebhookDelivery({ id: task.id, deliveryId: deliveryId! });
         const launch = yield* Queue.take(launches);
         assert.include(launch.commandId, `hung-up-${step}`);
-        // Keep each step in a fresh rate-limit window.
         yield* TestClock.adjust("61 seconds");
       }
       assert.equal(yield* Queue.size(launches), 0);
@@ -590,7 +578,6 @@ it.effect("a held request runs once even after the log has trimmed it", () =>
       const first = yield* service.triggerWebhook(requestFor(task, { relayDeliveryId: "kept" }));
       assert.equal(first._tag, "accepted");
       yield* Queue.take(launches);
-      // Push the original row out of the 50-row delivery log.
       const paused = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
       yield* Effect.forEach(Array.from({ length: 55 }), () =>
         service.triggerWebhook(requestFor(paused.task)),
@@ -607,7 +594,6 @@ it.effect("a rate-limited held request can run on a later pass", () =>
   withService(({ service, launches }) =>
     Effect.gen(function* () {
       const { task } = yield* service.upsert(yield* webhookTaskInput({ enabled: false }));
-      // Spend the task's 60-a-minute budget.
       yield* Effect.forEach(Array.from({ length: 60 }), () =>
         service.triggerWebhook(requestFor(task)),
       );
@@ -708,10 +694,117 @@ it.effect("deleting a task removes its delivery log", () =>
   ),
 );
 
+const githubSignature = (secret: string) =>
+  `sha256=${NodeCrypto.createHmac("sha256", secret).update(pullRequestBody).digest("hex")}`;
+
+it.effect("a signature can take the user's secret by ref, which works only once", () =>
+  withService(({ service, launches, secretsByRef }) =>
+    Effect.gen(function* () {
+      secretsByRef.set("secret-ref:00000000000000000000000000000001", "github-secret");
+      const githubSchedule = (secretRef: string) => ({
+        type: "webhook",
+        signature: { header: "x-hub-signature-256", encoding: "hex", prefix: "sha256=", secretRef },
+      });
+      const { task } = yield* service.upsert(
+        yield* webhookTaskInput({
+          schedule: githubSchedule("secret-ref:00000000000000000000000000000001"),
+        }),
+      );
+      assert.isTrue(task.webhook!.hasSecret);
+      const signed = yield* service.triggerWebhook(
+        requestFor(task, {
+          headers: {
+            "content-type": "application/json",
+            "x-hub-signature-256": githubSignature("github-secret"),
+          },
+        }),
+      );
+      assert.equal(signed._tag, "accepted");
+      yield* Queue.take(launches);
+
+      const reused = yield* service
+        .upsert(
+          yield* webhookTaskInput({
+            id: "scheduled-task:other",
+            schedule: githubSchedule("secret-ref:00000000000000000000000000000001"),
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.include(reused.message, "already used");
+    }),
+  ),
+);
+
+it.effect("a retried save with an already used secretRef keeps the stored secret", () =>
+  withService(({ service, launches, secretsByRef }) =>
+    Effect.gen(function* () {
+      secretsByRef.set("secret-ref:00000000000000000000000000000002", "github-secret");
+      const save = webhookTaskInput({
+        id: undefined,
+        commandId: "command:mcp:schedule-task:release-hook",
+        schedule: {
+          type: "webhook",
+          signature: {
+            header: "x-hub-signature-256",
+            encoding: "hex",
+            prefix: "sha256=",
+            secretRef: "secret-ref:00000000000000000000000000000002",
+          },
+        },
+      });
+      const first = yield* service.upsert(yield* save);
+      const retried = yield* service.upsert(
+        yield* webhookTaskInput({
+          id: undefined,
+          commandId: "command:mcp:schedule-task:release-hook",
+          schedule: {
+            type: "webhook",
+            signature: {
+              header: "x-hub-signature-256",
+              encoding: "hex",
+              prefix: "sha256=",
+              secretRef: "secret-ref:00000000000000000000000000000002",
+              secret: "made-up-secret",
+            },
+          },
+        }),
+      );
+      assert.equal(retried.task.id, first.task.id);
+      const signed = yield* service.triggerWebhook(
+        requestFor(retried.task, {
+          headers: {
+            "content-type": "application/json",
+            "x-hub-signature-256": githubSignature("github-secret"),
+          },
+        }),
+      );
+      assert.equal(signed._tag, "accepted");
+      yield* Queue.take(launches);
+    }),
+  ),
+);
+
+it.effect("a signature without any secret is refused", () =>
+  withService(({ service }) =>
+    Effect.gen(function* () {
+      const failure = yield* service
+        .upsert(
+          yield* webhookTaskInput({
+            schedule: {
+              type: "webhook",
+              signature: { header: "x-hub-signature-256", encoding: "hex", prefix: "sha256=" },
+            },
+          }),
+        )
+        .pipe(Effect.flip);
+      assert.include(failure.message, "needs a signing secret");
+    }),
+  ),
+);
+
 const signatureFor = (secret: string) =>
   `sha256=${NodeCrypto.createHmac("sha256", secret).update(pullRequestBody).digest("hex")}`;
 
-/** Count recorded by `t3_webhook_deliveries_total` for one outcome and source. */
 const deliveriesCounted = (outcome: string, source: "relay" | "direct") =>
   Metric.snapshot.pipe(
     Effect.map((snapshots) => {
@@ -756,7 +849,6 @@ it.effect("counts each handled request by what happened to it", () =>
       yield* Queue.take(launches);
       yield* service.triggerWebhook(requestFor(task));
       yield* service.triggerWebhook(requestFor(task, { token: "wrong" }));
-      // A request the relay held, then the same request again.
       const relayed = requestFor(task, { headers: signed, relayDeliveryId: "relay-1" });
       yield* service.triggerWebhook(relayed);
       yield* Queue.take(launches);

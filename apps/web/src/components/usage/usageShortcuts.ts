@@ -1,5 +1,4 @@
 import type { KeybindingCommand, ResolvedKeybindingsConfig } from "@t3tools/contracts";
-import type { UsageRange } from "@t3tools/shared/usageFormat";
 import type { UsageChartMetric } from "./UsageProviderChart";
 import { resolveShortcutCommand, type ShortcutEventLike } from "../../keybindings";
 
@@ -11,23 +10,16 @@ export const METRIC_OPTIONS = [
 ] as const satisfies readonly { value: UsageMetric; label: string; command: KeybindingCommand }[];
 
 export const WINDOW_OPTIONS = [
-  { value: "24h", label: "Past 24h", command: "usage.period.day" },
-  { value: "7d", label: "7 days", command: "usage.period.week" },
-  { value: "30d", label: "30 days", command: "usage.period.month" },
-  { value: "90d", label: "90 days", command: "usage.period.quarter" },
-] as const satisfies readonly { value: UsageRange; label: string; command: KeybindingCommand }[];
+  { days: 1, label: "Past 24h", command: "usage.period.day" },
+  { days: 7, label: "7 days", command: "usage.period.week" },
+  { days: 30, label: "30 days", command: "usage.period.month" },
+  { days: 90, label: "90 days", command: "usage.period.quarter" },
+] as const;
 
-/** Every selectable period: the shortcut-bearing ones plus month to date. */
-export const RANGE_OPTIONS = [
-  ...WINDOW_OPTIONS,
-  { value: "mtd", label: "This month", command: undefined },
-] as const satisfies readonly {
-  value: UsageRange;
-  label: string;
-  command: KeybindingCommand | undefined;
-}[];
+// Month to date has no keybinding; the period commands above are a fixed set.
+export const MONTH_TO_DATE_OPTION = { days: "mtd", label: "This month" } as const;
+export const PERIOD_OPTIONS = [...WINDOW_OPTIONS, MONTH_TO_DATE_OPTION] as const;
 
-/** Resolves page shortcuts without taking letters from fields or popup controls. */
 export function resolveUsageShortcut(
   event: ShortcutEventLike & { target: EventTarget | null },
   keybindings: ResolvedKeybindingsConfig,

@@ -23,15 +23,23 @@ describe("faviconUrlForOrigin", () => {
     "http://service.test",
     "http://private.onion",
     "http://127.1..",
+    "https://grafana.corp",
+    "https://build.lan",
+    "https://wiki.intranet",
+    "https://grafana.internal.acme-corp.com",
+    "https://jira.corp.acme-corp.com:8443",
   ])("does not disclose %s to the favicon provider", (origin) => {
     expect(faviconUrlForOrigin(origin)).toBeNull();
   });
 
-  it("keeps the public origin, port and requested size", () => {
-    expect(faviconUrlForOrigin("https://github.com:8443/pingdotgg/t3code?private=query", 64)).toBe(
-      "https://www.google.com/s2/favicons?domain=github.com%3A8443&sz=64",
-    );
-  });
+  // [fork:lockdown] Tripwire: no hostname goes to a third-party favicon
+  // service, public or not.
+  it.each(["https://github.com:8443/pingdotgg/t3code?private=query", "https://example.com"])(
+    "does not disclose the public host %s either",
+    (origin) => {
+      expect(faviconUrlForOrigin(origin, 64)).toBeNull();
+    },
+  );
 
   it.each([null, undefined, "", "invalid URL", "file:///tmp/private", "data:text/plain,private"])(
     "rejects an invalid or unsupported origin %s",

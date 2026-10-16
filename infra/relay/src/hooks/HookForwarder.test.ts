@@ -1,5 +1,6 @@
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no generateKeyPairSync.
 import * as NodeCrypto from "node:crypto";
 import * as EffectNodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
@@ -19,6 +20,7 @@ import * as HttpClientError from "effect/http/HttpClientError";
 import type * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Etag from "effect/http/Etag";
+import * as HttpEffect from "effect/http/HttpEffect";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -29,14 +31,11 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as RelayConfiguration from "../Config.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "../environments/ManagedEndpointAllocations.ts";
-import {
-  RELAY_HTTP_ROUTER_CONFIG,
-  relayCors,
-  relayNotFoundRoute,
-  traceRelayHttpRequestWith,
-} from "../http/Api.ts";
+import { RELAY_HTTP_ROUTER_CONFIG, traceRelayHttpRequestWith } from "../http/Api.ts";
+import * as RelayHttpApi from "../http/Api.ts";
 import * as HookForwarder from "./HookForwarder.ts";
 import { RELAY_HOOK_DELIVERY_TYP, verifyRelayJwt } from "@t3tools/shared/relayJwt";
+import * as HeldHooks from "./HeldHooks.ts";
 import * as HookInbox from "./HookInbox.ts";
 import type { HeldHook } from "./HookInboxStore.ts";
 import { RELAY_HOOK_UPSTREAM_TIMEOUT_MS } from "./upstream.ts";
@@ -69,6 +68,7 @@ const readyAllocation: ManagedEndpointAllocations.ManagedEndpointAllocation = {
   tunnelName: `t3coderelay-managedendpoint-dev-${endpointKey}`,
   dnsRecordId: "dns-record-id",
   readyAt: "2026-05-25T00:00:00.000Z",
+  tunnelReleasedAt: null,
   origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
   updatedAt: "2026-05-25T00:00:00.000Z",
   generation: 1,
@@ -96,7 +96,6 @@ interface Harness {
   readonly allocation?: ManagedEndpointAllocations.ManagedEndpointAllocation | null;
   readonly allow?: (key: string) => boolean;
   readonly allowEndpoint?: (endpointKey: string) => boolean;
-  /** Inbox capacity; hold reports full once this many requests are held. */
   readonly inboxCapacity?: number;
 }
 
@@ -113,7 +112,8 @@ function makeHarness(options: Harness = {}) {
           new Response("ok", { status: 200, headers: { "content-type": "text/plain" } }),
         ),
       ));
-  const forwarderLayer = HookForwarder.layer.pipe(
+  const layerForwarder = HookForwarder.layer.pipe(
+    Layer.provideMerge(HeldHooks.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(RelayConfiguration.RelayConfiguration, settings),
@@ -165,22 +165,28 @@ function makeHarness(options: Harness = {}) {
   const httpEffect = HttpRouter.toHttpEffect(
     Layer.mergeAll(
       HttpApiBuilder.layer(HttpApi.make("RelayApi").add(RelayApi.groups.hooks)).pipe(
-        Layer.provide(HookForwarder.hooksApi.pipe(Layer.provide(forwarderLayer))),
+        Layer.provide(HookForwarder.layerApi.pipe(Layer.provide(layerForwarder))),
         Layer.provide([NodeServices.layer, NodeHttpPlatform.layer, Etag.layerWeak]),
       ),
-      relayNotFoundRoute,
-      relayCors,
+      RelayHttpApi.layerNotFoundRoute,
+      RelayHttpApi.layerCors,
     ),
   ).pipe(Effect.provideService(HttpRouter.RouterConfig, RELAY_HTTP_ROUTER_CONFIG));
+  // Goes through Effect's request handler, which applies pre-response handlers
+  // (such as CORS) to the response it sends, as the Workers runtime does.
   const send = (request: Request) =>
     Effect.gen(function* () {
       const handler = yield* httpEffect;
-      return yield* handler.pipe(
+      const sent = yield* Deferred.make<HttpServerResponse.HttpServerResponse>();
+      yield* HttpEffect.toHandled(handler, (_request, response) =>
+        Deferred.succeed(sent, response),
+      ).pipe(
         Effect.provideService(
           HttpServerRequest.HttpServerRequest,
           HttpServerRequest.fromWeb(request),
         ),
       );
+      return yield* Deferred.await(sent);
     });
   return { sent, rateLimitKeys, held, send, httpEffect };
 }
@@ -240,9 +246,7 @@ describe("HookForwarder", () => {
       ]) {
         expect(sent.headers[dropped]).toBeUndefined();
       }
-      // Recomputed from the forwarded bytes, not copied from the sender.
       expect(sent.headers["content-length"]).toBe(String(body.length));
-      // The budget key is a hash, so the token never reaches the limiter.
       expect(harness.rateLimitKeys).toHaveLength(1);
       expect(harness.rateLimitKeys[0]).toMatch(/^[0-9a-f]{64}$/);
     }),
@@ -267,7 +271,6 @@ describe("HookForwarder", () => {
         audience: `t3-env:${environmentId}`,
         nowEpochSeconds: Math.floor((yield* Clock.currentTimeMillis) / 1_000),
       });
-      // The proof names exactly the delivery the environment receives.
       expect(payload).toMatchObject({
         environmentId,
         hookId: "hook-1",
@@ -297,7 +300,6 @@ describe("HookForwarder", () => {
       expect(response.headers["content-type"]).toBe("application/json");
       expect(response.headers["set-cookie"]).toBeUndefined();
       expect(response.headers["access-control-allow-origin"]).toBeUndefined();
-      // Served from the relay's origin, so it may never render or run there.
       expect(response.headers["x-content-type-options"]).toBe("nosniff");
       expect(response.headers["content-security-policy"]).toBe("sandbox; default-src 'none'");
       expect(new TextDecoder().decode(yield* readBody(response))).toBe('{"error":"bad_signature"}');
@@ -386,8 +388,6 @@ describe("HookForwarder", () => {
 
   it.effect("forwards only to the link that owns the endpoint key", () =>
     Effect.gen(function* () {
-      // Another account linked the same environment id under its own key; its
-      // link must not receive this endpoint's hooks, whatever order rows come in.
       const intruder = {
         ...managedLink,
         userId: "user_attacker",
@@ -401,7 +401,6 @@ describe("HookForwarder", () => {
         "env.example.test",
       ]);
 
-      // Without the owner's link, the key resolves to nothing at all.
       const orphaned = makeHarness({ links: [intruder] });
       const orphanedResponse = yield* orphaned.send(
         new Request(hookUrl(), { method: "POST", body: "{}" }),
@@ -503,7 +502,6 @@ describe("HookForwarder", () => {
     Effect.gen(function* () {
       const harness = makeHarness();
       const response = yield* harness.send(new Request(hookUrl(), { method: "OPTIONS" }));
-      // No hook endpoint accepts OPTIONS, so it falls through to the 404 route.
       expect(response.status).toBe(404);
       expect(response.headers["access-control-allow-origin"]).toBeUndefined();
       expect(response.headers["access-control-allow-methods"]).toBeUndefined();
@@ -593,7 +591,7 @@ describe("HookForwarder", () => {
       expect(serialized).not.toContain("also-secret");
       expect(serialized).not.toContain("header-secret");
       const server = spans.find((span) => span.kind === "server");
-      expect(server?.attributes.get("url.path")).toBe(`/v1/hooks/${endpointKey}/hook-1/<redacted>`);
+      expect(server?.attributes.get("url.path")).toBe(`/v1/hooks/${endpointKey}/hook-1/redacted`);
     }),
   );
 
@@ -609,15 +607,13 @@ describe("HookForwarder", () => {
       });
       const harness = makeHarness();
       const handler = yield* harness.httpEffect;
-      // As the worker runtime runs it: its own tracer around ours, off for hook
-      // paths. This checks the predicate; whether alchemy applies it per event
-      // is only visible on a deployed worker (see worker.ts).
+      // As the worker runtime runs it: its own tracer around ours, turned off
+      // (see worker.ts). Whether alchemy applies the predicate per event is
+      // only visible on a deployed worker.
       yield* HttpMiddleware.tracer(
         traceRelayHttpRequestWith(handler, Layer.succeed(Tracer.Tracer, tracer)),
       ).pipe(
-        Effect.provideService(HttpMiddleware.TracerDisabledWhen, (request) =>
-          HookForwarder.isRelayHookPath(request.url),
-        ),
+        Effect.provideService(HttpMiddleware.TracerDisabledWhen, () => true),
         Effect.withTracer(tracer),
         Effect.provideService(
           HttpServerRequest.HttpServerRequest,
@@ -634,7 +630,7 @@ describe("HookForwarder", () => {
       const servers = spans.filter((span) => span.kind === "server");
       expect(servers).toHaveLength(1);
       expect(servers[0]?.attributes.get("url.path")).toBe(
-        `/v1/hooks/${endpointKey}/hook-1/<redacted>`,
+        `/v1/hooks/${endpointKey}/hook-1/redacted`,
       );
       expect(spans.every((span) => span.traceId !== "11111111111111111111111111111111")).toBe(true);
     }),
@@ -675,7 +671,6 @@ describe("HookForwarder", () => {
               HttpServerRequest.fromWeb(
                 new Request(hookUrl(), {
                   method: "POST",
-                  // A sender's own trace context never reaches the environment.
                   headers: {
                     traceparent: "00-11111111111111111111111111111111-2222222222222222-01",
                     "x-b3-traceid": "33333333333333333333333333333333",
@@ -697,7 +692,6 @@ describe("HookForwarder", () => {
       expect(sent.headers.traceparent).not.toContain("1111111111");
       expect(sent.headers["x-b3-traceid"]).toBeUndefined();
 
-      // Only a plain outcome name is recorded.
       spans.length = 0;
       yield* forward(respondWith("<script>alert(1)</script>"));
       yield* Effect.yieldNow;
@@ -766,9 +760,7 @@ describe("HookForwarder", () => {
         expect(hook?.query).toBe("a=1");
         expect([...(hook?.body ?? [])]).toEqual([0, 255, 10]);
         expect(hook?.headers["x-sig"]).toBe("s");
-        // Every spelling of the hook id shares one per-hook cap.
         expect(hook?.hookKey).toBe("hook-1");
-        // The sender cannot choose the delivery id.
         expect(hook?.headers["x-t3-relay-delivery-id"]).toBeUndefined();
         expect(hook?.id).not.toBe("forged");
       }),
