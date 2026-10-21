@@ -4,10 +4,10 @@ import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as HttpServer from "effect/unstable/http/HttpServer";
-import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
-import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
 import { getTelemetryIdentifier } from "./Identify.ts";
@@ -53,12 +53,12 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
   it.effect("never sends telemetry even when the environment enables it", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
-      const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-telemetry-base-",
       });
 
-      const telemetryLayer = AnalyticsService.layer.pipe(Layer.provideMerge(serverConfigLayer));
-      const configLayer = ConfigProvider.layer(
+      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+      const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromUnknown({
           T3CODE_TELEMETRY_ENABLED: true,
           T3CODE_POSTHOG_KEY: "phc_test_key",
@@ -66,7 +66,7 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           T3CODE_TELEMETRY_FLUSH_BATCH_SIZE: 20,
         }),
       );
-      const batchServerLayer = HttpServer.serve(
+      const layerBatchServer = HttpServer.serve(
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           if (request.method !== "POST") {
@@ -83,19 +83,19 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           return HttpServerResponse.jsonUnsafe({});
         }),
       );
-      const runtimeLayer = telemetryLayer.pipe(
-        Layer.provide(configLayer),
+      const layerRuntime = layerTelemetry.pipe(
+        Layer.provide(layerConfig),
         Layer.provide(
           Layer.mergeAll(
-            Layer.succeed(HostProcessPlatform, "linux"),
-            Layer.succeed(HostProcessArchitecture, "arm64"),
+            Layer.succeed(HostProcess.Platform, "linux"),
+            Layer.succeed(HostProcess.Architecture, "arm64"),
           ),
         ),
         Layer.provideMerge(NodeHttpServer.layerTest),
       );
 
       yield* Effect.gen(function* () {
-        yield* Layer.launch(batchServerLayer).pipe(Effect.forkScoped);
+        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
         const telemetryIdentifier = yield* getTelemetryIdentifier;
         assert.equal(telemetryIdentifier !== null, true);
         const analytics = yield* AnalyticsService.AnalyticsService;
@@ -105,7 +105,7 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
         }
 
         yield* analytics.flush;
-      }).pipe(Effect.provide(runtimeLayer));
+      }).pipe(Effect.provide(layerRuntime));
 
       const batchRequests = capturedRequests.filter(
         (request): request is RecordedBatchRequest & { readonly body: RecordedBatchBody } =>
@@ -119,41 +119,41 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
   it.effect("does not send batch requests when telemetry is disabled", () =>
     Effect.gen(function* () {
       const capturedPaths: Array<string> = [];
-      const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+      const layerServerConfig = ServerConfig.ServerConfig.layerTest(process.cwd(), {
         prefix: "t3-telemetry-disabled-",
       });
-      const telemetryLayer = AnalyticsService.layer.pipe(Layer.provideMerge(serverConfigLayer));
-      const configLayer = ConfigProvider.layer(
+      const layerTelemetry = AnalyticsService.layer.pipe(Layer.provideMerge(layerServerConfig));
+      const layerConfig = ConfigProvider.layer(
         ConfigProvider.fromUnknown({
           T3CODE_TELEMETRY_ENABLED: false,
           T3CODE_POSTHOG_KEY: "phc_test_key",
           T3CODE_POSTHOG_HOST: "http://localhost",
         }),
       );
-      const batchServerLayer = HttpServer.serve(
+      const layerBatchServer = HttpServer.serve(
         Effect.gen(function* () {
           const request = yield* HttpServerRequest.HttpServerRequest;
           capturedPaths.push(request.url);
           return HttpServerResponse.jsonUnsafe({});
         }),
       );
-      const runtimeLayer = telemetryLayer.pipe(
-        Layer.provide(configLayer),
+      const layerRuntime = layerTelemetry.pipe(
+        Layer.provide(layerConfig),
         Layer.provide(
           Layer.mergeAll(
-            Layer.succeed(HostProcessPlatform, "linux"),
-            Layer.succeed(HostProcessArchitecture, "arm64"),
+            Layer.succeed(HostProcess.Platform, "linux"),
+            Layer.succeed(HostProcess.Architecture, "arm64"),
           ),
         ),
         Layer.provideMerge(NodeHttpServer.layerTest),
       );
 
       yield* Effect.gen(function* () {
-        yield* Layer.launch(batchServerLayer).pipe(Effect.forkScoped);
+        yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
         const analytics = yield* AnalyticsService.AnalyticsService;
         yield* analytics.record("test.disabled", { index: 1 });
         yield* analytics.flush;
-      }).pipe(Effect.provide(runtimeLayer));
+      }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(capturedPaths, []);
     }),

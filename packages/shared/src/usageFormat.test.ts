@@ -7,6 +7,7 @@ import {
   formatHourShort,
   formatPercent,
   formatRelativeHourShort,
+  makePeriodWindow,
   makeWindow,
 } from "./usageFormat.ts";
 
@@ -84,38 +85,11 @@ describe("hourly usage formatting", () => {
   });
 
   it("builds an exact minute-aligned 24-hour request", () => {
-    const window = makeWindow("24h", new Date("2026-08-11T12:37:42.123Z"));
+    const window = makeWindow(1, new Date("2026-08-11T12:37:42.123Z"), "hour");
 
     expect(window.resolution).toBe("hour");
     expect(window.sinceTime).toBe("2026-08-10T12:37:00.000Z");
     expect(window.untilTime).toBe("2026-08-11T12:37:00.000Z");
-  });
-
-  it("runs month to date from the 1st of the viewer's month through today", () => {
-    const window = inZone("America/Los_Angeles", () =>
-      makeWindow("mtd", new Date("2026-09-13T18:00:00.000Z")),
-    );
-
-    expect(window.resolution).toBe("day");
-    expect(window.sinceDay).toBe("2026-09-01");
-    expect(window.untilDay).toBe("2026-09-13");
-  });
-
-  it("keeps month to date a single day on the 1st", () => {
-    const window = inZone("UTC", () => makeWindow("mtd", new Date("2026-09-01T18:00:00.000Z")));
-
-    expect(window.sinceDay).toBe("2026-09-01");
-    expect(window.untilDay).toBe("2026-09-01");
-  });
-
-  it("ends month to date on the viewer's calendar day, not UTC's", () => {
-    // Still Sep 30 in Los Angeles, so the window must not roll into October.
-    const window = inZone("America/Los_Angeles", () =>
-      makeWindow("mtd", new Date("2026-10-01T04:00:00.000Z")),
-    );
-
-    expect(window.sinceDay).toBe("2026-09-01");
-    expect(window.untilDay).toBe("2026-09-30");
   });
 
   it("degrades an unknown resolved zone to UTC instead of crashing", () => {
@@ -127,23 +101,30 @@ describe("hourly usage formatting", () => {
     try {
       const now = new Date("2026-08-11T12:37:42.123Z");
 
-      expect(makeWindow("24h", now).timeZone).toBe("UTC");
-      expect(makeWindow("30d", now).timeZone).toBe("UTC");
+      expect(makeWindow(1, now, "hour").timeZone).toBe("UTC");
+      expect(makeWindow(30, now).timeZone).toBe("UTC");
     } finally {
       resolvedOptions.mockRestore();
     }
   });
 });
 
-/** Runs `build` as if the viewer's browser resolved to `timeZone`. */
-function inZone<A>(timeZone: string, build: () => A): A {
-  const resolved = new Intl.DateTimeFormat().resolvedOptions();
-  const spy = vi
-    .spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions")
-    .mockReturnValue({ ...resolved, timeZone });
-  try {
-    return build();
-  } finally {
-    spy.mockRestore();
-  }
-}
+describe("makePeriodWindow", () => {
+  it("runs month to date from the 1st of the viewer's month through today", () => {
+    vi.stubEnv("TZ", "UTC");
+    const window = makePeriodWindow("mtd", new Date("2026-10-16T12:00:00Z"));
+    expect(window).toMatchObject({
+      sinceDay: "2026-10-01",
+      untilDay: "2026-10-16",
+      resolution: "day",
+    });
+    expect(makePeriodWindow("mtd", new Date("2026-10-01T00:30:00Z")).sinceDay).toBe("2026-10-01");
+    vi.unstubAllEnvs();
+  });
+
+  it("keeps the fixed periods on upstream's day and hour windows", () => {
+    const now = new Date("2026-10-16T12:37:00Z");
+    expect(makePeriodWindow(1, now)).toEqual(makeWindow(1, now, "hour"));
+    expect(makePeriodWindow(30, now)).toEqual(makeWindow(30, now));
+  });
+});

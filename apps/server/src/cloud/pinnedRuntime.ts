@@ -4,7 +4,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Semaphore from "effect/Semaphore";
-import type { HttpClient } from "effect/unstable/http";
+import type { HttpClient } from "effect/http";
 
 import * as ProcessRunner from "../processRunner.ts";
 
@@ -28,12 +28,10 @@ const pinnedRuntimeInstallLock = Semaphore.makeUnsafe(1);
 
 export interface PinnedRuntimePaths {
   readonly versionDir: string;
-  /** The executable. Its existence is what marks a runtime as present. */
   readonly entryPath: string;
   readonly sentinelPath: string;
 }
 
-/** The exact command that runs a pinned runtime. */
 export function pinnedRuntimeCommand(paths: PinnedRuntimePaths): {
   readonly command: string;
   readonly args: ReadonlyArray<string>;

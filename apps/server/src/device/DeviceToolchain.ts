@@ -16,14 +16,15 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
+import DEVICE_TOOL_VERSIONS from "./deviceToolVersions.json" with { type: "json" };
+
 const DEVICE_HUB_PACKAGE = "expo-device-hub";
-export const DEVICE_HUB_VERSION = "0.12.0";
+export const DEVICE_HUB_VERSION = DEVICE_TOOL_VERSIONS[DEVICE_HUB_PACKAGE];
 const AGENT_DEVICE_PACKAGE = "agent-device";
-export const AGENT_DEVICE_VERSION = "0.21.12";
+export const AGENT_DEVICE_VERSION = DEVICE_TOOL_VERSIONS[AGENT_DEVICE_PACKAGE];
 
 export interface DeviceToolPaths {
   readonly installDir: string;
-  /** Absolute path of the tool's entry script, run with a resolved Node runtime. */
   readonly entryPath: string;
   readonly sentinelPath: string;
 }
@@ -80,7 +81,6 @@ const deviceToolchainPaths = (path: Path.Path, baseDir: string): DeviceToolchain
   agentDevice: toolPaths(path, baseDir, AGENT_DEVICE_SPEC),
 });
 
-/** Keep daemon state (daemon.json, sessions) in userdata, separate from tool installs. */
 export const agentDeviceStateDir = (path: Path.Path, stateDir: string): string =>
   path.join(stateDir, "device", "agent-device");
 
@@ -145,7 +145,6 @@ export const isDeviceHubInstalled = (baseDir: string) =>
 export const isAgentDeviceInstalled = (baseDir: string) =>
   isToolInstalled(baseDir, AGENT_DEVICE_SPEC, (paths) => paths.agentDevice);
 
-/** Read completed installs without downloading or starting either tool. */
 export const deviceToolVersions = Effect.fn("DeviceToolchain.versions")(function* (
   baseDir: string,
   running: { hub?: string; agent?: string } = {},
