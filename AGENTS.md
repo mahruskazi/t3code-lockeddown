@@ -80,11 +80,13 @@ The most common defect in this repo is a change that works on the path you teste
 ## Dev servers
 
 - `vp i` installs. Worktrees get this from the t3.json setup script; if module resolution looks broken, it probably did not run.
+- Setup runs in the background. While `.t3/setup-running` names a live PID, wait for it and do not run `vp i`. It ends with `.t3/setup-done` or `.t3/setup-failed` (with the error tail). With no marker at all, setup never ran here, so run `vp i` yourself.
 - `vp run dev` starts server and web. In a worktree, state defaults to that worktree's gitignored `.t3`, which deliberately outranks an ambient `T3CODE_HOME` so you cannot land on shared state by accident. An explicit `--home-dir` still wins.
 - Ports derive from the worktree path and are stable across restarts, but read the real ones from the `[dev-runner]` line since occupied ports shift.
 - Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, then give that full URL to an unpaired browser. Do not wire up `tailscale serve` by hand, open the URL yourself, or consume the user's pairing link. A browser with the reusable dev cookie can use the bare origin. If a normal one-time token was consumed, mint a fresh one with `node apps/server/src/bin.ts pair`. It carries standard scopes, while the startup URL carries admin scopes needed for Connections settings.
 - To reuse web dev auth across worktrees, configure one fixed `T3CODE_DEV_AUTH_TOKEN` in the main checkout's gitignored `.env`. The `t3.json` setup links that file into worktrees. Never commit or publish the token or a startup URL. See [Reusable dev credential](docs/operations/development.md#reusable-dev-credential).
 - Stop what you started, by the PID you tracked. See rule 1.
+- Need a second checkout? `git worktree add` it next to this worktree, not in `/tmp`. Remove it when done.
 
 ## This is a locked-down fork
 
@@ -109,32 +111,33 @@ Two things follow, and they are why the invariants below exist:
 
 Every outbound path this fork has, and what it may carry. A path that is not on this list is a finding.
 
-| Path                                                                                   | Carries code or prompts                                                         | Status                                                                                                                                       |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider harnesses (Codex, Claude Code, Cursor, Grok, OpenCode, Pi, Muse)              | Yes — this is the authorized harness                                            | The product. Claude and Cursor run in-process via their vendors' SDKs, not spawned CLIs. See the notes below.                                |
-| Codex `/feedback` upload (OpenAI, through the Codex CLI)                               | Yes — the whole thread plus Codex's own logs                                    | Opt-in per invocation; the user types `/feedback` in a Codex thread. See the note below.                                                     |
-| Source-control hosts (GitHub, GitLab, Bitbucket, Azure DevOps, Forgejo/Gitea, GitCafe) | Yes — but to the repo's own remote, under the operator's credentials            | Authorized. Includes the PR media proxy, which keeps the token on GitHub hosts (`apps/server/src/assets/GitHubMediaFetch.ts`)                |
-| T3 Connect relay (`app.t3.codes` plus a cloudflared tunnel)                            | Yes — the entire session                                                        | Opt-in per environment via `t3 connect`, never on by default. See the note below.                                                            |
-| `t3 triage` diagnostic issue (public issue on `pingdotgg/t3code`)                      | Yes — logs, DB contents, terminal output                                        | **Removed** — invariant 4                                                                                                                    |
-| PostHog analytics                                                                      | Event metadata                                                                  | **Removed** — invariant 1                                                                                                                    |
-| npm registry or GitHub release archives, at runtime                                    | No, but pulls executable code onto the machine                                  | **Removed** — invariants 2 and 3                                                                                                             |
-| ACP Registry agents (`cdn.agentclientprotocol.com`, then archives, npm, PyPI)          | Yes — the agent it installs runs every turn                                     | **Removed** — invariant 2                                                                                                                    |
-| Managed Codex and Antigravity installs (GitHub releases, `dl.google.com`)              | No, but are executables                                                         | Pinned version, sha256 in the source, fetched only when the operator picks managed setup. See the note below                                 |
-| Headless preview browser (Chrome for Testing, `storage.googleapis.com`)                | No, but is an executable                                                        | Pinned version, sha256 in the source, fetched the first time the server-side browser is used (`apps/server/src/preview/PreviewBrowser.ts`)   |
-| Link and tab favicons (Google's `s2/favicons`)                                         | No — but every public hostname that appears in a chat link or browser tab       | **Removed** — `faviconUrlForOrigin` returns nothing (`packages/shared/src/favicon.ts`, `[fork:lockdown]`)                                    |
-| Provider update checks (`registry.npmjs.org`, Homebrew, `api.meta.ai` for Muse)        | No — a package name and the installed channel                                   | Version lookups, gated by the provider-update-check setting (`packages/provider-core/src/server/maintenanceResolver.ts`)                     |
-| T3 release lookup (`registry.npmjs.org/t3/<version>`)                                  | No — a version number, from the web client                                      | Read-only check behind "update everything" (`apps/web/src/state/npmRelease.ts`)                                                              |
-| Browser-panel address bar search (`duckduckgo.com`)                                    | Whatever the user types into the address bar that is not a URL                  | User-typed only; agents navigate by URL (`packages/shared/src/preview.ts`)                                                                   |
-| Codex ChatGPT sign-in (`auth.openai.com`, `api.openai.com/v1/models`)                  | No — an OAuth token and the model list                                          | Operator-triggered, for managed Codex setup (`apps/server/src/provider/CodexChatGptAuth.ts`)                                                 |
-| CLIProxyAPI usage source (operator's own hub)                                          | No — quota reads and the Codex reset-credit claim, through the hub              | Operator-configured URL, off by default (`apps/server/src/usage/cliproxyApi.ts`)                                                             |
-| Provider account usage (Anthropic, Cursor, xAI, OpenCode, Google)                      | No — reads each CLI's saved login and asks that same vendor for quota and usage | Automatic with provider status checks; Cursor's Keychain read is opt-in; the Claude reset-credit claim is user-triggered. See the note below |
-| GitHub release list (`api.github.com`)                                                 | No — release metadata                                                           | Read-only fetch by the mobile app's server-update check (`apps/mobile/src/features/settings/environment-maintenance.ts`)                     |
-| `cloudflared` binary download                                                          | No, but is an executable                                                        | Pinned version, sha256-verified, fetched only when the operator turns on T3 Connect (`packages/shared/src/relayClient.ts`)                   |
-| litellm pricing table (`raw.githubusercontent.com`)                                    | No — a rates JSON, cached for a day                                             | Read-only fetch (`apps/server/src/usage/UsageService.ts`)                                                                                    |
-| Model classification manifest (`raw.githubusercontent.com`)                            | No — a list of current model slugs, cached for an hour                          | Read-only fetch, gated by the provider-update-check setting (`apps/server/src/provider/ModelManifest.ts`)                                    |
-| Open VSX theme search (`open-vsx.org`)                                                 | No — a theme query from the web client                                          | Read-only fetch (`apps/web/src/openVsxThemes.ts`)                                                                                            |
-| OTLP traces, metrics and logs export                                                   | No — span metadata and log lines, including workspace and worktree paths        | Operator-configured, off by default. See the note below (`apps/server/src/observability/Observability.ts`)                                   |
-| Hosted app auth (`app.t3.codes`, Clerk)                                                | No — account identity                                                           | Only on the hosted-web and relay paths                                                                                                       |
+| Path                                                                                                        | Carries code or prompts                                                         | Status                                                                                                                                       |
+| ----------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider harnesses (Codex, Claude Code, Cursor, Grok, OpenCode, Pi, Muse)                                   | Yes — this is the authorized harness                                            | The product. Claude and Cursor run in-process via their vendors' SDKs, not spawned CLIs. See the notes below.                                |
+| Codex `/feedback` upload (OpenAI, through the Codex CLI)                                                    | Yes — the whole thread plus Codex's own logs                                    | Opt-in per invocation; the user types `/feedback` in a Codex thread. See the note below.                                                     |
+| Source-control hosts (GitHub, GitLab, Bitbucket, Azure DevOps, Forgejo/Gitea, GitCafe)                      | Yes — but to the repo's own remote, under the operator's credentials            | Authorized. Includes the PR media proxy, which keeps the token on GitHub hosts (`apps/server/src/assets/GitHubMediaFetch.ts`)                |
+| T3 Connect relay (`app.t3.codes` plus a cloudflared tunnel)                                                 | Yes — the entire session                                                        | Opt-in per environment via `t3 connect`, never on by default. See the note below.                                                            |
+| `t3 triage` diagnostic issue (public issue on `pingdotgg/t3code`)                                           | Yes — logs, DB contents, terminal output                                        | **Removed** — invariant 4                                                                                                                    |
+| PostHog analytics                                                                                           | Event metadata                                                                  | **Removed** — invariant 1                                                                                                                    |
+| npm registry or GitHub release archives, at runtime                                                         | No, but pulls executable code onto the machine                                  | **Removed** — invariants 2 and 3                                                                                                             |
+| ACP Registry agents (`cdn.agentclientprotocol.com`, then archives, npm, PyPI)                               | Yes — the agent it installs runs every turn                                     | **Removed** — invariant 2                                                                                                                    |
+| Managed Codex and Antigravity installs (GitHub releases, `dl.google.com`)                                   | No, but are executables                                                         | Pinned version, sha256 in the source, fetched only when the operator picks managed setup. See the note below                                 |
+| Headless preview browser (Chrome for Testing, `storage.googleapis.com`)                                     | No, but is an executable                                                        | Pinned version, sha256 in the source, fetched the first time the server-side browser is used (`apps/server/src/preview/PreviewBrowser.ts`)   |
+| Link and tab favicons (Google's `s2/favicons`)                                                              | No — but every public hostname that appears in a chat link or browser tab       | **Removed** — `faviconUrlForOrigin` returns nothing (`packages/shared/src/favicon.ts`, `[fork:lockdown]`)                                    |
+| Provider update checks (`registry.npmjs.org`, Homebrew, `api.meta.ai` for Muse)                             | No — a package name and the installed channel                                   | Version lookups, gated by the provider-update-check setting (`packages/provider-core/src/server/maintenanceResolver.ts`)                     |
+| T3 release lookup (`registry.npmjs.org/t3/<version>`)                                                       | No — a version number, from the web client                                      | Read-only check behind "update everything" (`apps/web/src/state/npmRelease.ts`)                                                              |
+| Browser-panel address bar search (DuckDuckGo by default; Google, Bing, Brave, Kagi, Ecosia or a custom URL) | Whatever the user types into the address bar that is not a URL                  | User-typed only; agents navigate by URL. The engine is a user setting (`packages/shared/src/preview.ts`)                                     |
+| Codex ChatGPT sign-in (`auth.openai.com`, `api.openai.com/v1/models`)                                       | No — an OAuth token and the model list                                          | Operator-triggered, for managed Codex setup (`apps/server/src/provider/CodexChatGptAuth.ts`)                                                 |
+| CLIProxyAPI usage source (operator's own hub)                                                               | No — quota reads and the Codex reset-credit claim, through the hub              | Operator-configured URL, off by default (`apps/server/src/usage/cliproxyApi.ts`)                                                             |
+| Provider account usage (Anthropic, Cursor, xAI, OpenCode, Google)                                           | No — reads each CLI's saved login and asks that same vendor for quota and usage | Automatic with provider status checks; Cursor's Keychain read is opt-in; the Claude reset-credit claim is user-triggered. See the note below |
+| GitHub release list (`api.github.com`)                                                                      | No — release metadata                                                           | Read-only fetch by the mobile app's server-update check (`apps/mobile/src/features/settings/environment-maintenance.ts`)                     |
+| `cloudflared` binary download                                                                               | No, but is an executable                                                        | Pinned version, sha256-verified, fetched only when the operator turns on T3 Connect (`packages/shared/src/relayClient.ts`)                   |
+| litellm pricing table (`raw.githubusercontent.com`, falling back to `api.github.com`)                       | No — a rates JSON, cached for a day                                             | Read-only fetch (`apps/server/src/usage/UsageService.ts`)                                                                                    |
+| Model classification manifest (`raw.githubusercontent.com`)                                                 | No — a list of current model slugs, cached for an hour                          | Read-only fetch, gated by the provider-update-check setting (`apps/server/src/provider/ModelManifest.ts`)                                    |
+| Open VSX theme search (`open-vsx.org`)                                                                      | No — a theme query from the web client                                          | Read-only fetch (`apps/web/src/openVsxThemes.ts`)                                                                                            |
+| OTLP traces, metrics and logs export                                                                        | No — span metadata and log lines, including workspace and worktree paths        | Operator-configured, off by default. See the note below (`apps/server/src/observability/Observability.ts`)                                   |
+| EAS Simulator cloud devices (`api.expo.dev`, then each session's Expo-hosted device hub)                    | Yes — app builds an agent installs, plus the screen and input it streams        | Operator-configured device host, off by default. See the note below (`apps/server/src/device/EasDeviceHost.ts`)                              |
+| Hosted app auth (`app.t3.codes`, Clerk)                                                                     | No — account identity                                                           | Only on the hosted-web and relay paths                                                                                                       |
 
 **The Claude harness is a library, not a subprocess.** Upstream moved the Claude provider from a
 spawned `claude` CLI to `@anthropic-ai/claude-agent-sdk` running inside the server process
@@ -172,7 +175,15 @@ agent run on this machine, so treat it as an access decision like T3 Connect.
 
 **Codex `/feedback` is a deliberate upload, not a turn.** Sending `/feedback` in a Codex thread calls the Codex app-server's `feedback/upload`, which posts that thread's transcript to OpenAI with `includeLogs: true` and returns an id to quote at OpenAI support. It rides the authorized harness and goes to the vendor whose CLI already sees every turn in that thread, which is why it is not a fifth invariant — but the logs are wider than a turn, and nothing about the payload is reviewable from here. Treat invoking it on a proprietary thread the way you would treat pasting that thread into a vendor support ticket, because that is what it is. Nothing sends it automatically: no code path reaches `uploadFeedback` without the user typing the command.
 
-**T3 Connect is the open one.** This fork has not disabled it, and it is the one available path that would carry everything — code, prompts, diffs, terminal output — through a third party. It takes a deliberate `t3 connect` to start, so nothing leaks by accident, but enabling it on a machine holding proprietary code is an authorization decision, not a convenience. Local network and Tailscale reach the same clients without it. If we ever decide the relay is out of bounds here, that becomes a fifth invariant with a choke point and a tripwire, like the four below.
+**T3 Connect is the open one.** This fork has not disabled it, and it is the one available path that would carry everything — code, prompts, diffs, terminal output — through a third party. It takes a deliberate `t3 connect` to start, so nothing leaks by accident, but enabling it on a machine holding proprietary code is an authorization decision, not a convenience. Local network and Tailscale reach the same clients without it. Any paired client may turn it on: upstream's default pairing grant includes relay and access management, on the grounds that `terminal:operate` already reaches them through a shell. If we ever decide the relay is out of bounds here, that becomes a fifth invariant with a choke point and a tripwire, like the four below.
+
+**EAS Simulator hosts rent a device in Expo's cloud.** Adding an EAS host under the Device settings, with an Expo
+access token, `EXPO_TOKEN`, or an `eas login` session, lets agents start iOS simulator sessions on Expo's
+servers (`apps/server/src/device/EasDeviceHost.ts`, `ExpoApi.ts`). A session starts empty, and the agent
+uploads a build from this machine or installs one from a URL, so a compiled build of the code being worked
+on leaves the machine, along with whatever it shows on screen. Each session bills the Expo account. No host
+exists by default, and the local and SSH device hosts are unchanged. Adding one is an authorization
+decision, the same shape as T3 Connect and OTLP.
 
 **OTLP export is the other operator switch.** Setting `otlpTracesUrl`, `otlpMetricsUrl` or `otlpLogsUrl` makes the server forward its spans, metrics or log records to that URL on an interval, alongside the local `server.trace.ndjson` it always writes. The spans carry operation names, provider kind, model names, thread and turn ids, and attachment counts — not prompt text, file contents, diffs, or terminal output. They do carry `terminal.cwd`, `checkpoint.cwd`, and `git.cwd`, so a collector learns the paths of the repositories worked on here, which is enough to identify projects and clients. Nothing filters span attributes; the only redaction in the pipeline covers HTTP header names. The settings are empty by default and are set from `settings.json` or `T3CODE_OTLP_*`, never from the Settings UI, which only reports whether export is on. Upstream also honors the standard `OTEL_EXPORTER_OTLP_*` variables; this fork ignores them unless `T3CODE_OTEL_STANDARD_ENV=true` (`packages/shared/src/otelEnvironment.ts`, `[fork:lockdown]`), because a machine-wide endpoint set for some other tool would otherwise start shipping this server's telemetry without anyone deciding to. Pointing them at a collector on a machine holding proprietary code is an authorization decision, the same shape as T3 Connect.
 
@@ -256,18 +267,47 @@ This fork is deployed to remote SSH hosts (e.g. Coder workspaces) from the local
 
 An empty database is a bad test. Seed your worktree's `.t3` with a copy of real data instead of pointing at live state:
 
-- Run `vp run migrate-dev-db` with your dev server stopped. It rebuilds `<worktree>/.t3/userdata/statev2.sqlite` from a read-only snapshot of `~/.t3/userdata/statev2.sqlite`, the developer's real data. It keeps recent projects and their stopped threads, and drops scheduled tasks, pending work, and auth sessions, so your dev server never runs the developer's agents. Raise `--projects` and `--threads-per-project` for more data.
+- The first `vp run dev` in a worktree does this for you when its database is missing. `--no-seed` or `T3CODE_DEV_SEED=0` skips it.
+- Run `vp run migrate-dev-db` with your dev server stopped to refresh. It rebuilds `<worktree>/.t3/userdata/statev2.sqlite` from a read-only snapshot of `~/.t3/userdata/statev2.sqlite`, the developer's real data. It keeps recent projects and their stopped threads, and drops scheduled tasks, pending work, and auth sessions, so your dev server never runs the developer's agents. Raise `--projects` and `--threads-per-project` for more data.
 - Refresh `statev2.sqlite`, not `state.sqlite`. The server copies the V1 `state.sqlite` only when `statev2.sqlite` is missing.
 - Bring `secrets` and `settings.json` only if the flow under test needs them.
 - Copy in, never symlink. Data flows one way: into your sandbox, never back out.
 
 ## Verifying
 
-- Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
+- Before you push, run `vp run check:changed`. It runs CI's fast checks for changed files: format, lint, knip, typecheck of affected packages and dependents, and tests beside changes. CI still runs the full test suites.
+- While you iterate, run `vp test run <files>`. For big files, add `-t "<name>"`.
+- Do not use `npx tsc`. Use `vp run typecheck`; it uses tsc-rs, which is 3x faster.
+- Run `node -e` snippets from `apps/server` or the owning package. `effect` does not resolve from the repo root.
 - Test meaningful logic or observable behavior. Do not render components to static markup to assert props or attributes, or add tests that merely assert callback wiring or mirror the implementation.
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
-- The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong.
+- The server is event-sourced, and side effects run after the command commits. In tests, drain the effect worker (`OrchestrationEffectWorkerV2.drain`) or await the specific persisted event or `Deferred` that marks the milestone. Never wait on sleeps or polling. A test that needs a timeout to pass is wrong. Concretely:
+  - `it.effect` runs on a `TestClock`; `Effect.sleep` only advances through `TestClock.adjust`. `it.live` is wall-clock and only for subprocess or network fixtures.
+  - No `yieldNow` or `sleep` polling loops. Await the `Deferred`, take from the `Queue`, or drain the worker.
+  - No per-test timeout argument or `retry`. The project timeout is the ceiling, and flaky tests are fixed, not retried.
+  - No `performance.now()` or `Date.now()` deltas. Assert on events and counts, not elapsed time.
+  - Browser tests assert through `expect.element` or `vi.waitFor`, never `requestAnimationFrame` or `transitionend`.
+  - `vi.mock` factories must not spread a real module that pulls in Shiki or the diff workers.
+  - `it.skip` and friends need a tracking issue on the line above: `// quarantine: #1234 <why>`.
+  - Lint enforces this: `t3code/no-test-timeout-or-unreasoned-skip`, `t3code/no-frame-waits-in-browser-tests`, `t3code/no-wall-clock-in-tests`, `t3code/no-real-time-wait-in-tests`, `t3code/no-polling-loop-in-tests`.
+- Web browser tests are `*.browser.test.tsx` or `*.browser.test.ts` and render with `await using screen = await render(...)` from `apps/web/test/render.tsx`. `t3code/require-disposable-render` errors on the old patterns.
+  - Acquire what the test drives after mounting (fake timers it advances, spies it sets up after mounting) after the render, so it disposes before the unmount. Anything the first render reads comes before it.
+  - A helper that renders and then waits or clicks puts the screen in an `AsyncDisposableStack` and `move()`s it out only on success, so a failed wait still unmounts.
+  - `rerender` needs a fresh element on every call.
+  - No lifecycle hooks and no module-level mutable state. Shared mock state that `vi.mock` factories read is reset by a `setup()` call at the top of the test.
+  - `router` is on by default. Pass `router: false` only with a one-line comment saying why.
+
+  ```tsx
+  it("saves on Enter", async () => {
+    const onSave = vi.fn();
+    using _now = vi.spyOn(Date, "now").mockReturnValue(0);
+    await using screen = await render(<TitleEditor onSave={onSave} />, { router: "/threads/1" });
+    await userEvent.type(screen.getByRole("textbox"), "Title{Enter}");
+    expect(onSave).toHaveBeenCalledWith("Title");
+  });
+  ```
+
 - Upon request, user-visible frontend changes should get one integrated pass in a real client: `test-t3-app` for web, `test-t3-mobile` for mobile. The primary agent does this once after integrating. Subagents do not launch their own dev servers. Ask permission before doing computer use or spinning up browsers.
 
 For authorized mobile verification, a missing or outdated native client is a build step, not a blocker. Run `node scripts/mobile-native-client.ts ensure <ios|android> <device-id>` on the simulator host before starting Metro. It checks the local Expo fingerprint and builds/installs when needed. See `test-t3-mobile` for the full workflow.
@@ -280,7 +320,7 @@ For authorized mobile verification, a missing or outdated native client is a bui
 - UI changes need before/after images. Motion or timing needs a short video.
 - Upload PR evidence to GitHub. Never commit PR-only screenshots or assets such as `.github/pr-assets/`.
 - One request is one PR. Split it only when the maintainer asks. Outside contributions follow the stricter [one problem per PR](CONTRIBUTING.md#one-problem) rule.
-- When babysitting: poll checks and comments newer than the last push, verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
+- When babysitting: call `watch_pull_request` and end your turn. T3 Code wakes you on checks, comments, or conflicts. Do not poll or sleep. Verify each bot finding against the source, fix real ones, dismiss false positives with a written reason. Stay quiet when nothing is new. Stop when the bots are green on the latest commit.
 
 ## Documentation
 
@@ -313,7 +353,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 - `packages/contracts` - Effect/Schema contracts plus small derived helpers. No heavy runtime logic.
 - `packages/shared` - shared runtime utils, subpath exports, no barrel.
 - `packages/client-runtime` - client code shared by web and mobile.
-- `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency.
+- `.repos/` - vendored read-only references. Prefer their patterns over invented ones. Never edit or import from them. Sync with `vpr sync:repos` when bumping the matching dependency. If it is missing (sparse checkout), read a file with `git show origin/main:.repos/<path>`.
 
 ## Taste
 
@@ -321,6 +361,12 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 - Client mutations use `createEnvironmentRpcCommand`. Add protected methods to `CLIENT_GUARDED_RPC_SCOPES` in contracts and use the command's `permissionAtom` for UI availability. Grants are checked at execution against the destination environment; the server remains authoritative. Keep raw RPC clients inside `rpc/`, and extend the permission behavior tests when adding a protected method.
 - Server features are services; transports stay thin. A `ws.ts` RPC handler, HTTP route, or MCP tool decodes input, calls one service method, and maps errors. See [Effect services](docs/internals/effect-services.md).
 - `apps/web/src/components/ui` exports own their look. Pick a `variant` or `size`; do not restyle one with `className`. If none fits and the look is a generic concept, add a variant to the component; a look that belongs to one feature stays in that feature's own component, not in `components/ui`. Layout classes (width, flex, margin, position) belong on the parent. `shadcn/no-restyle` fails lint on violations. See [Web UI](docs/internals/web-ui.md).
+- Reusable Effect functions use `Effect.fn("Service.operation")` with a stable span name, not a
+  function wrapping `Effect.gen`. Keep `Effect.gen` for inline programs and layer construction.
+  Use `Effect.fnUntraced` only when spans would be too frequent (stream chunks, per-event
+  projection, tight loops) or duplicate an existing tracing boundary; explain that choice nearby.
+  Named `Effect.fn` creates a span; the unnamed form does not. Preserve existing span names and
+  options, and pass combinators as additional function-builder arguments.
 - Inferred types over annotations. `any` is the enemy.
 - Comments say why: a constraint, an external quirk, or an invariant the code can't show. Don't restate names or signatures, narrate steps, or record history. `t3code/no-low-value-comments` catches the mechanical cases.
 - Our users drive agents all day and notice a dropped frame, a lying spinner, and a stale label. No continuously repainting animations; they peg the GPU on high-refresh displays.
