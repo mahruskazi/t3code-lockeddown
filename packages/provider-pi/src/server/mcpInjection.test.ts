@@ -8,6 +8,7 @@ import {
   T3_PI_MCP_EXTENSION_PATH_ENV,
 } from "./mcpExtensionSource.ts";
 import { buildPiRpcLaunch, resolvePiLaunchArgs } from "./mcpInjection.ts";
+import { PI_USER_INPUT_VERSION_ENV } from "./userInput.ts";
 
 const threadId = ThreadId.make("thread-pi-t3-mcp");
 
@@ -58,6 +59,7 @@ describe("pi T3 MCP injection", () => {
     assert.equal(launch.env[T3_MCP_URL_ENV], "http://127.0.0.1:43123/mcp");
     assert.equal(launch.env[T3_MCP_BEARER_ENV], "secret-pi-token");
     assert.equal(launch.env[T3_PI_RUNTIME_MODE_ENV], "approval-required");
+    assert.equal(launch.env[PI_USER_INPUT_VERSION_ENV], "1");
     assert.equal(launch.env[T3_PI_MCP_EXTENSION_PATH_ENV], "/tmp/cache/pi-t3-mcp-extension.ts");
 
     const permissionOnly = buildPiRpcLaunch({
@@ -81,6 +83,7 @@ describe("pi T3 MCP injection", () => {
     assert.isUndefined(permissionOnly.env[T3_MCP_URL_ENV]);
     assert.isUndefined(permissionOnly.env[T3_MCP_BEARER_ENV]);
     assert.equal(permissionOnly.env[T3_PI_RUNTIME_MODE_ENV], "auto-accept-edits");
+    assert.equal(permissionOnly.env[PI_USER_INPUT_VERSION_ENV], "1");
     assert.equal(
       permissionOnly.env[T3_PI_MCP_EXTENSION_PATH_ENV],
       "/tmp/cache/pi-t3-mcp-extension.ts",
@@ -98,7 +101,7 @@ describe("pi T3 MCP injection", () => {
         "--provider",
         "anthropic",
       ],
-      environment: {},
+      environment: { [PI_USER_INPUT_VERSION_ENV]: "stale" },
       mcpSession,
       extensionPath: "/tmp/cache/pi-t3-mcp-extension.ts",
       sessionPath: "/fake/persisted.jsonl",
@@ -116,6 +119,7 @@ describe("pi T3 MCP injection", () => {
       "--no-tools",
     ]);
     assert.isFalse(launch.hasT3Mcp);
+    assert.isUndefined(launch.env[PI_USER_INPUT_VERSION_ENV]);
     assert.deepInclude(resolvePiLaunchArgs("--mode text"), {
       ok: false,
       message: "Pi launch argument '--mode' is controlled by T3 Code and cannot be overridden.",
