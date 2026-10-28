@@ -255,6 +255,24 @@ describe("OtelEnvironment", () => {
     );
   });
 
+  it.effect("names the variable each signal's endpoint came from", () =>
+    Effect.gen(function* () {
+      const otel = yield* load({
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector:4318",
+        OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "https://tempo:4318/v1/traces",
+      });
+      const variableOf = (signal: OtelEnvironment.OtelSignal) =>
+        OtelEnvironment.OtelSignal.$match(signal, {
+          Export: ({ variable }) => variable,
+          Off: () => undefined,
+          Unset: () => undefined,
+        });
+      assert.strictEqual(variableOf(otel.traces), "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
+      assert.strictEqual(variableOf(otel.metrics), "OTEL_EXPORTER_OTLP_ENDPOINT");
+      assert.strictEqual(variableOf(otel.logs), "OTEL_EXPORTER_OTLP_ENDPOINT");
+    }),
+  );
+
   describe("resolveSignalEndpoint", () => {
     const t3Export = {
       protocol: "http/json",
@@ -268,6 +286,7 @@ describe("OtelEnvironment", () => {
     });
     const otelExport = OtelEnvironment.OtelSignal.Export({
       url: "http://otel:4318/v1/logs",
+      variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
       protocol: "http/protobuf",
       headers: { "x-key": "otel" },
     });
@@ -276,7 +295,12 @@ describe("OtelEnvironment", () => {
         name: "T3CODE_OTLP_*_URL wins over a signal the OTEL variables turned off",
         otel: withLogs(OtelEnvironment.OtelSignal.Off()),
         t3Url: "http://t3:4318/v1/logs",
-        expected: { url: "http://t3:4318/v1/logs", export: t3Export },
+        expected: {
+          url: "http://t3:4318/v1/logs",
+          export: t3Export,
+          source: "environment" as const,
+          variable: "T3CODE_OTLP_LOGS_URL",
+        },
       },
       {
         name: "an OTEL endpoint brings its headers and protocol over the fallback",
@@ -289,6 +313,8 @@ describe("OtelEnvironment", () => {
             headers: { "x-key": "otel" },
             exportIntervalMs: 5_000,
           },
+          source: "environment" as const,
+          variable: "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
         },
       },
       {
@@ -297,14 +323,45 @@ describe("OtelEnvironment", () => {
         t3Url: undefined,
         expected: undefined,
       },
-    ])("$name", ({ otel, t3Url, expected }) => {
+      {
+        name: "an unset signal takes the first non-blank fallback",
+        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+        t3Url: undefined,
+        expected: {
+          url: "http://settings:4318/v1/logs",
+          export: t3Export,
+          source: "settings" as const,
+        },
+      },
+      {
+        name: "a desktop bootstrap URL that differs from the setting wins as the desktop's own",
+        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+        t3Url: undefined,
+        bootstrapUrl: "http://desktop:4318/v1/logs",
+        expected: {
+          url: "http://desktop:4318/v1/logs",
+          export: t3Export,
+          source: "bootstrap" as const,
+        },
+      },
+      {
+        name: "a desktop bootstrap URL that forwards the setting counts as the setting",
+        otel: withLogs(OtelEnvironment.OtelSignal.Unset()),
+        t3Url: undefined,
+        bootstrapUrl: " http://settings:4318/v1/logs ",
+        expected: {
+          url: "http://settings:4318/v1/logs",
+          export: t3Export,
+          source: "settings" as const,
+        },
+      },
+    ])("$name", ({ otel, t3Url, bootstrapUrl = "", expected }) => {
       assert.deepStrictEqual(
         OtelEnvironment.resolveSignalEndpoint(
           otel,
           "logs",
           { url: t3Url, export: t3Export },
-          "",
-          "http://settings:4318/v1/logs",
+          { bootstrapUrl, settingsUrl: "http://settings:4318/v1/logs" },
         ),
         expected,
       );
@@ -319,12 +376,17 @@ describe("OtelEnvironment", () => {
         export: { protocol: "http/json", headers: undefined, exportIntervalMs: 10_000 },
       } as const;
       assert.strictEqual(
-        OtelEnvironment.resolveSignalEndpoint(otel, "logs", t3, "http://settings:4318/v1/logs"),
+        OtelEnvironment.resolveSignalEndpoint(otel, "logs", t3, {
+          bootstrapUrl: undefined,
+          settingsUrl: "http://settings:4318/v1/logs",
+        }),
         undefined,
       );
       assert.strictEqual(
-        OtelEnvironment.resolveSignalEndpoint(otel, "traces", t3, "http://settings:4318/v1/traces")
-          ?.url,
+        OtelEnvironment.resolveSignalEndpoint(otel, "traces", t3, {
+          bootstrapUrl: undefined,
+          settingsUrl: "http://settings:4318/v1/traces",
+        })?.url,
         "http://settings:4318/v1/traces",
       );
     }),
@@ -393,6 +455,7 @@ describe("isRelayTracingEnabled", () => {
         otel.traces,
         OtelEnvironment.OtelSignal.Export({
           url: env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+          variable: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
           protocol: "http/protobuf",
           headers: undefined,
         }),

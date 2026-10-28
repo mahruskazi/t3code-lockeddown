@@ -225,6 +225,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.serverResolvedCommandContext).toBe(true);
       expect(second.capabilities.projectProviderInstanceOverrides).toBe(true);
       expect(second.capabilities.agentActivityPublishing).toBe(false);
+      // [fork:lockdown] Tripwire, invariant 4: clients offer triage only for this flag.
+      expect(second.capabilities.triage).toBeUndefined();
     }),
   );
 
