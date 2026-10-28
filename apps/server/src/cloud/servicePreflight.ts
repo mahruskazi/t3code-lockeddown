@@ -23,8 +23,15 @@ export function runServicePreflight(input: {
     return {
       status: "blocked",
       version,
-      reason:
-        "This release requires a newer T3 Code service launcher. Update it on the server machine.",
+      // A stale `t3` earlier on PATH (an old npm/nvm global) makes `t3 service install`
+      // reinstall itself and report success, so name the exact install and the path check.
+      // [fork:lockdown] Upstream points at its published installer; invariant 3: only our build.
+      reason: [
+        `The installed service launcher speaks protocol ${input.launcherProtocol}, but t3@${version} requires protocol ${SERVICE_LAUNCHER_PROTOCOL}.`,
+        `On the server machine, install this fork's ${version} build: from a checkout at that version, run \`scripts/setup-remote-t3.sh <host>\`.`,
+        `Check that \`t3 --version\` prints ${version} and that \`which -a t3\` lists no older t3 (such as an npm or nvm install) first, then run \`~/.local/bin/t3 service install\` (the setup script's default path).`,
+        "Updating the desktop app does not update this CLI, and `t3 service update` only repairs the service with whichever CLI runs it.",
+      ].join(" "),
     };
   }
 
