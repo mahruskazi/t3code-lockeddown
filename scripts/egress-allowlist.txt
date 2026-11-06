@@ -1,0 +1,68 @@
+# Hostnames the T3 Code app (or its docs-in-code comments and demo fixtures)
+# may reference. scripts/egress-audit.sh fails CI when a diff ADDS a hostname
+# that is not listed here. `*.example.com` matches example.com and subdomains.
+#
+# Policy for this fork: telemetry and trace-collection hosts are DELIBERATELY
+# NOT listed (us.i.posthog.com, api.axiom.co), so any change that adds or moves
+# a reference to them fails CI and forces a human review. Do not add them.
+# When CI fails on a hostname, either reject the upstream change or add the
+# host here in the same commit with a comment explaining why the app needs it.
+
+# --- loopback, LAN, and reserved test hosts ---
+localhost
+127.0.0.1
+0.0.0.0
+10.0.2.2            # Android emulator host loopback
+192.168.1.24        # font-preview mock terminal string (SettingsFontPreviews)
+100.82.16.5         # mobile showcase fixture (App Store screenshots)
+host                # artifact of URL-template strings like `https://host:port`
+*.invalid           # RFC 2606 reserved, never resolves
+*.example.com
+*.example.org
+*.ts.net            # Tailscale MagicDNS (user's own tailnet + showcase fixtures)
+
+# --- T3 Code product hosts ---
+t3.codes
+*.t3.codes          # app.t3.codes, latest/nightly update manifests, clerk
+*.t3.sh             # mobile showcase fixtures
+t3.chat             # example URL in preview tool descriptions
+
+# --- source-control forges (user-configured integrations) ---
+github.com
+api.github.com
+raw.githubusercontent.com
+cli.github.com
+gitlab.com
+bitbucket.org
+api.bitbucket.org
+dev.azure.com
+
+# --- opt-in cloud features (T3 Connect), release plumbing ---
+api.clerk.com
+challenges.cloudflare.com   # Turnstile, loaded by Clerk auth pages
+api.push.apple.com          # relay worker -> APNs (their infra, not the app)
+api.sandbox.push.apple.com
+u.expo.dev                  # mobile OTA updates
+registry.npmjs.org          # provider CLI install/update (user-triggered)
+open-vsx.org                # web theme search (user-triggered)
+timestamp.acs.microsoft.com # Windows code-signing timestamps (build only)
+
+# --- documentation links and platform specs in code comments/UI ---
+agentclientprotocol.com
+apps.apple.com
+play.google.com
+www.apple.com
+www.google.com
+platform.openai.com
+cursor.com
+anysphere.enterprise.slack.com  # ACP reference doc link in a comment
+fetch.spec.whatwg.org
+json-schema.org
+www.jsonrpc.org
+www.w3.org
+schemas.android.com
+git-scm.com
+tailwindcss.com
+www.nayuki.io
+ziglang.org
+x.com

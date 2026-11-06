@@ -1,0 +1,43 @@
+name: Egress audit
+
+# Fork-specific guard (mahruskazi/t3code-lockeddown): fail any change that adds
+# a network hostname to shipped code without an allowlist entry, and surface
+# changes to telemetry/updater/relay code for human review.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  egress-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "base=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${{ github.event.before }}" 2>/dev/null; then
+            echo "base=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            # New branch or forced history: fall back to the first parent.
+            echo "base=$(git rev-parse '${{ github.sha }}^1')" >> "$GITHUB_OUTPUT"
+            echo "head=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run egress audit
+        run: |
+          scripts/egress-audit.sh "${{ steps.range.outputs.base }}" "${{ steps.range.outputs.head }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
