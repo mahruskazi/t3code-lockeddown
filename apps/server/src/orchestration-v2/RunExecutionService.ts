@@ -631,6 +631,8 @@ export const layer: Layer.Layer<
         readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
         // Root turn snapshot written with the run when T3 ends the run itself.
         readonly abandonedProviderTurn?: OrchestrationV2ProviderTurn;
+        // Open items of that turn; no provider event can close them once its runtime stops.
+        readonly abandonedTurnItems?: ReadonlyArray<OrchestrationV2TurnItem>;
         readonly terminal: ProviderTerminalEvent;
         readonly completedAt?: DateTime.Utc;
         readonly failureItemPersisted: boolean;
@@ -773,6 +775,25 @@ export const layer: Layer.Layer<
                     payload: input.abandonedProviderTurn,
                   },
                 ]),
+            ...(yield* Effect.forEach(input.abandonedTurnItems ?? [], (turnItem) =>
+              allocateEventId().pipe(
+                Effect.map((id) => ({
+                  id,
+                  type: "turn-item.updated" as const,
+                  threadId: input.run.threadId,
+                  runId: input.run.id,
+                  ...(turnItem.nodeId === null ? {} : { nodeId: turnItem.nodeId }),
+                  providerInstanceId: input.run.providerInstanceId,
+                  occurredAt: completedAt,
+                  payload: {
+                    ...turnItem,
+                    status: "interrupted" as const,
+                    completedAt,
+                    updatedAt: completedAt,
+                  },
+                })),
+              ),
+            )),
             {
               id: yield* allocateEventId(),
               type: "run-attempt.updated" as const,
@@ -1073,6 +1094,9 @@ export const layer: Layer.Layer<
           ReadonlySet<OrchestrationV2TurnItem["id"]>
         >(new Set(inheritedBackgroundTurnItemsById.keys()));
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
+        const openRootToolItems = yield* Ref.make<ReadonlyMap<TurnItemId, OrchestrationV2TurnItem>>(
+          new Map(),
+        );
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
           terminal: ProviderTerminalEvent,
         ) {
@@ -1222,6 +1246,22 @@ export const layer: Layer.Layer<
                   next.delete(event.turnItem.id);
                 } else {
                   next.add(event.turnItem.id);
+                }
+                return next;
+              });
+            }
+            if (
+              belongsToRootRun &&
+              (event.turnItem.type === "dynamic_tool" ||
+                event.turnItem.type === "command_execution")
+            ) {
+              const toolItem = event.turnItem;
+              yield* Ref.update(openRootToolItems, (current) => {
+                const next = new Map(current);
+                if (isSettledTurnItemStatus(toolItem.status)) {
+                  next.delete(toolItem.id);
+                } else {
+                  next.set(toolItem.id, toolItem);
                 }
                 return next;
               });
@@ -1611,7 +1651,12 @@ export const layer: Layer.Layer<
                     expectedStatus: "running",
                   },
                   openRunOwnedSubagents: openSubagents,
-                  ...(abandonedProviderTurn === null ? {} : { abandonedProviderTurn }),
+                  ...(abandonedProviderTurn === null
+                    ? {}
+                    : {
+                        abandonedProviderTurn,
+                        abandonedTurnItems: [...(yield* Ref.get(openRootToolItems)).values()],
+                      }),
                   completedAt,
                   terminal: makeFailedTerminalEvent(
                     makeProviderFailure({

@@ -2926,6 +2926,75 @@ it.effect.each([
     }),
 );
 
+it.effect.each([{ interrupt: "succeeds" }, { interrupt: "fails" }] as const)(
+  "closes the run's open tool items after a stream failure only if the interrupt succeeds (it $interrupt)",
+  ({ interrupt }) =>
+    Effect.gen(function* () {
+      const key = `abandoned-tool-items:${interrupt}`;
+      const ids = backgroundScenarioIds(key);
+      const finishedItemId = TurnItemId.make(`turn-item:${key}:finished`);
+      const { finalEvents } = yield* captureRootRunTermination({
+        key,
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: () =>
+          Stream.make(
+            {
+              type: "provider_turn.updated" as const,
+              driver,
+              providerTurn: {
+                id: ids.rootProviderTurnId,
+                providerThreadId: ids.providerThreadId,
+                nodeId: ids.rootNodeId,
+                runAttemptId: ids.attemptId,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running" as const,
+                startedAt: null,
+                completedAt: null,
+              },
+            },
+            backgroundTurnItemEvent(ids, "dynamic_tool", "running", 1),
+            backgroundTurnItemEvent(ids, "command_execution", "running", 2, finishedItemId),
+            backgroundTurnItemEvent(ids, "command_execution", "completed", 2, finishedItemId),
+          ).pipe(
+            Stream.concat(
+              Stream.fail(
+                new ProviderAdapter.ProviderAdapterEventStreamError({
+                  driver,
+                  providerSessionId: ProviderSessionId.make(`session:${key}`),
+                  cause: "session detached for a workspace handoff",
+                }),
+              ),
+            ),
+          ),
+        interruptTurn: (input) =>
+          interrupt === "fails"
+            ? Effect.fail(
+                new ProviderAdapter.ProviderAdapterInterruptError({
+                  driver,
+                  providerThreadId: input.providerThread.id,
+                  providerTurnId: input.providerTurnId,
+                  cause: "provider already exited",
+                }),
+              )
+            : Effect.void,
+      });
+      const closed = finalEvents.flatMap((event) =>
+        event.type === "turn-item.updated" && event.payload.type !== "error" ? [event.payload] : [],
+      );
+      if (interrupt === "fails") {
+        // The provider may still be running it, and the next start retries the interrupt.
+        assert.deepEqual(closed, []);
+      } else {
+        assert.deepEqual(
+          closed.map((item) => [item.id, item.status]),
+          [[ids.itemId, "interrupted"]],
+        );
+        assert.isNotNull(closed[0]?.completedAt);
+      }
+    }),
+);
+
 it.effect("does not interrupt an ended provider when its terminal write fails", () =>
   Effect.gen(function* () {
     const interrupts = yield* Ref.make(0);
