@@ -41,6 +41,8 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
     platform?: NodeJS.Platform;
     spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
     runtimeRenameFailures?: number;
+    /** Served by URL instead of the pinned package. */
+    responses?: Readonly<Record<string, () => Response>>;
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -94,6 +96,7 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
       current: input.manifestCurrent ?? Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
       refresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
       forceRefresh: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+      refreshOnDemand: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
       refreshInBackground: Effect.void,
     }),
     Effect.provideService(HostProcess.Platform, input.platform ?? "darwin"),
@@ -109,6 +112,8 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
       HttpClient.make((request) =>
         Effect.sync(() => {
           downloads++;
+          const respond = input.responses?.[request.url];
+          if (respond) return HttpClientResponse.fromWeb(request, respond());
           return Object.defineProperty(
             HttpClientResponse.fromWeb(
               request,
@@ -528,4 +533,22 @@ it.effect("keeps an activated runtime when a later update fails verification", (
   }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
-// Stands in for Windows' bsdtar: CRLF listings, and extraction writes the Windows layout.
+// [fork:lockdown] Tripwire: an update check never asks npm or GitHub for a newer Codex, so a
+// managed install only ever runs the release pinned in CodexInstallation.ts.
+it.effect("never looks past the pinned release for an update", () =>
+  Effect.gen(function* () {
+    const h = yield* makeHarness();
+    yield* h.installation.start;
+    yield* terminalState(h.installation);
+    expect(h.downloads()).toBe(1);
+    yield* h.installation.checkForUpdate;
+    expect(h.downloads()).toBe(1);
+    expect(yield* h.installation.state).toMatchObject({
+      installedVersion: "0.156.1",
+      version: "0.156.1",
+    });
+    yield* h.installation.start;
+    yield* terminalState(h.installation);
+    expect(h.downloads()).toBe(1);
+  }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
