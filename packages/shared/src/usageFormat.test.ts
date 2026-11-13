@@ -4,6 +4,7 @@ import type { UsageSource } from "@t3tools/contracts";
 
 import {
   formatHourShort,
+  formatTokens,
   makePeriodWindow,
   makeWindow,
   usageSourceMessages,
@@ -121,12 +122,11 @@ describe("usage source messages", () => {
     ]);
   });
 
-  it("omits empty missing sources, healthy sources, and diagnostics handled by an action", () => {
+  it("omits empty missing sources and healthy sources", () => {
     expect(
       usageSourceMessages([
         malformedSource(0, { status: "missing" }),
         malformedSource(1, { status: "ok" }),
-        malformedSource(1, { action: "enableCursorKeychain" }),
       ]),
     ).toEqual([]);
     expect(usageSourceMessages([])).toEqual([]);
@@ -200,5 +200,13 @@ describe("makePeriodWindow", () => {
     const now = new Date("2026-10-16T12:37:00Z");
     expect(makePeriodWindow(1, now)).toEqual(makeWindow(1, now, "hour"));
     expect(makePeriodWindow(30, now)).toEqual(makeWindow(30, now));
+  });
+});
+
+describe("token formatting", () => {
+  it("moves to the next unit when rounding reaches it", () => {
+    expect(formatTokens(999_999)).toBe("1M");
+    expect(formatTokens(999_999_999)).toBe("1B");
+    expect(formatTokens(-999_999)).toBe("-1M");
   });
 });

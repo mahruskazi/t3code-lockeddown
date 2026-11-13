@@ -34,10 +34,13 @@ export class DeviceToolchainInstallError extends Schema.TaggedError<DeviceToolch
     tool: Schema.String,
     step: Schema.String,
     exitCode: Schema.optional(Schema.Number),
+    reason: Schema.optional(Schema.Literal("npm_not_found")),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
+    if (this.reason === "npm_not_found")
+      return "Device support needs npm, which is not on the T3 server's PATH. Install npm (it comes with Node.js from nodejs.org), restart T3 Code, then retry.";
     const suffix = this.exitCode === undefined ? "" : ` (exit code ${this.exitCode})`;
     return `Installing ${this.tool} failed while ${this.step}${suffix}.`;
   }
@@ -138,6 +141,19 @@ export const isDeviceHubInstalled = (baseDir: string) =>
 
 export const isAgentDeviceInstalled = (baseDir: string) =>
   isToolInstalled(baseDir, AGENT_DEVICE_SPEC, (paths) => paths.agentDevice);
+
+/** Entry of the first installed agent-device among `versions`; never installs. */
+export const installedAgentDeviceEntry = Effect.fn("DeviceToolchain.installedAgentDeviceEntry")(
+  function* (baseDir: string, versions: ReadonlyArray<string>) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    for (const version of versions) {
+      const paths = toolPaths(path, baseDir, { ...AGENT_DEVICE_SPEC, version });
+      if (yield* isInstalled(fs, paths, version)) return paths.entryPath;
+    }
+    return null;
+  },
+);
 
 export const deviceToolVersions = Effect.fn("DeviceToolchain.versions")(function* (
   baseDir: string,
