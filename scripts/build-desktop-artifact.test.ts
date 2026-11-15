@@ -503,6 +503,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  const forkFeed = "https://github.com/mahruskazi/t3code-lockeddown/releases/download/main-build";
+
   it.effect("omits update feeds for pull request preview builds", () =>
     Effect.gen(function* () {
       const preview = yield* createBuildConfig(
@@ -548,6 +550,39 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("ad-hoc signs unsigned macOS builds that carry the fork feed", () =>
+    Effect.gen(function* () {
+      const unsigned = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.9-main.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const signed = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.1.9-main.3",
+        true,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.deepStrictEqual(unsigned.publish, [{ provider: "generic", url: forkFeed }]);
+      assert.include(unsigned.mac as object, { identity: "-", hardenedRuntime: false });
+      assert.notProperty(signed.mac as object, "identity");
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({ env: { T3CODE_DESKTOP_UPDATE_FEED_URL: forkFeed } }),
         ),
       ),
     ),

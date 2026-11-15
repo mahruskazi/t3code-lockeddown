@@ -2879,6 +2879,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      // [fork:lockdown] Fork builds are ad-hoc signed so the updater can codesign-verify them;
+      // hardened runtime would refuse their unsigned native libraries.
+      ...(!signed && forkFeedUrl ? { identity: "-", hardenedRuntime: false } : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
