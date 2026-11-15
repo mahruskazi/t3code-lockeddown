@@ -19,8 +19,8 @@ it("enables host verification while keeping every execution approval at its orig
       true,
     ),
   ).toEqual({ granular: { mcp_elicitations: true, rules: true, sandbox_approval: true } });
-  expect(permitsOrdinaryElicitation("never", false)).toBe(false);
-  expect(permitsOrdinaryElicitation(undefined, true)).toBe(false);
-  expect(permitsOrdinaryElicitation(undefined, false)).toBe(true);
-  expect(permitsOrdinaryElicitation({ granular: { mcp_elicitations: false } }, false)).toBe(false);
+  expect(permitsOrdinaryElicitation("never")).toBe(false);
+  // Full access asks for elicitations itself and accepts them, so Orbit changes nothing there.
+  expect(permitsOrdinaryElicitation(undefined)).toBe(true);
+  expect(permitsOrdinaryElicitation({ granular: { mcp_elicitations: false } })).toBe(false);
 });

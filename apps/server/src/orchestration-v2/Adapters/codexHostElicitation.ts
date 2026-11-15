@@ -16,8 +16,9 @@ export function withHostElicitation(policy: V2TurnStartParams__AskForApproval, n
     ? { granular: { ...policy.granular, mcp_elicitations: true } }
     : policy;
 }
-export function permitsOrdinaryElicitation(policy: unknown, fullAccess: boolean) {
-  if (policy === "never" || (policy === undefined && fullAccess)) return false;
+// An unset policy takes the runtime mode default, and every default asks for MCP elicitations.
+export function permitsOrdinaryElicitation(policy: unknown) {
+  if (policy === "never") return false;
   return !(
     typeof policy === "object" &&
     policy !== null &&
