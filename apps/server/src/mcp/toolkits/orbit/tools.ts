@@ -1,6 +1,6 @@
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { Tool, Toolkit } from "effect/ai";
+import { McpSchema, Tool, Toolkit } from "effect/ai";
 import { Input } from "../../orbitInput.ts";
 import * as OrbitBroker from "../../OrbitBroker.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -16,5 +16,6 @@ export const OrbitToolkit = Toolkit.make(
     dependencies: [OrbitBroker.OrbitBroker, McpInvocationContext.McpInvocationContext],
   })
     .annotate(Tool.Destructive, false)
-    .annotate(Tool.OpenWorld, false),
+    .annotate(Tool.OpenWorld, false)
+    .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients),
 );
