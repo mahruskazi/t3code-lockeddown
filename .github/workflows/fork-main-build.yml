@@ -1,0 +1,264 @@
+name: Fork main build
+
+# [fork:lockdown] Keeps a rolling `main-build` prerelease of this fork: the Apple Silicon desktop
+# app and the Linux `t3` server archives for remote hosts. The desktop app updates itself from
+# this release (apps/desktop/src/electron/ElectronForkUpdater.ts), so the feed URL below must
+# match FORK_MAIN_BUILD_FEED_URL there. Builds are ad-hoc signed and not notarized.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-main-build
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: main-build
+  FEED_URL: https://github.com/mahruskazi/t3code-lockeddown/releases/download/main-build
+
+jobs:
+  version:
+    name: Resolve version
+    if: github.repository == 'mahruskazi/t3code-lockeddown'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/contents/apps/desktop/package.json?ref=${GITHUB_SHA}" \
+            -H "Accept: application/vnd.github.raw" -o package.json
+      - id: version
+        shell: bash
+        run: echo "version=$(jq -r .version package.json)-main.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+  mac:
+    name: macOS arm64 app
+    needs: version
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      # checkout's credential cleanup fails on the orphaned gitlinks in the vendored .repos tree.
+      - name: Checkout
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/web... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Set version and public configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "$VERSION"
+          # Public T3 Connect identifiers, as upstream's preview builds use. Connect stays opt-in.
+          cp .env.example .env
+
+      - name: Build app
+        shell: bash
+        env:
+          T3CODE_DESKTOP_UPDATE_FEED_URL: ${{ env.FEED_URL }}
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run dist:desktop:artifact --platform mac --target dmg --arch arm64 --build-version "$VERSION" --verbose
+
+      - name: Verify app
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip=$(ls release/*-arm64.zip)
+          dir="$RUNNER_TEMP/verify-app"
+          ditto -x -k "$zip" "$dir"
+          app=$(ls -d "$dir"/*.app)
+          codesign --verify --deep --strict "$app"
+          test "$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist")" = "$VERSION"
+          grep -q "url: $FEED_URL" "$app/Contents/Resources/app-update.yml"
+
+      - name: Upload app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-mac-arm64
+          path: |
+            release/*-arm64.zip
+            release/*-arm64.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  server:
+    name: Linux ${{ matrix.arch }} server archive
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            resource_key: linux-x64
+          # node-pty compiles from source, so arm64 builds on arm64 hardware.
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            resource_key: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Checkout
+        shell: bash
+        env:
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git -c checkout.workers=0 checkout --detach FETCH_HEAD
+
+      - name: Install build libraries
+        shell: bash
+        run: sudo apt-get update && sudo apt-get install -y patchelf
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_target }}
+
+      - name: Set version and public configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/update-release-package-versions.ts "$VERSION"
+          cp .env.example .env
+
+      - name: Build server bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop:bundle
+
+      - name: Apply web client branding
+        run: node scripts/apply-web-brand-assets.ts production apps/server/dist/client
+
+      - name: Build resource monitor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target "${{ matrix.rust_target }}"
+          dir="$RUNNER_TEMP/cli-resource-monitor/${{ matrix.resource_key }}"
+          mkdir -p "$dir"
+          cp "native/resource-monitor/target/${{ matrix.rust_target }}/release/t3-resource-monitor" "$dir/"
+
+      - name: Build CLI single-executable
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build server archive
+        run: |
+          node scripts/build-cli-archive.ts \
+            --platform linux \
+            --arch "${{ matrix.arch }}" \
+            --version "$VERSION" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test server archive
+        shell: bash
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$VERSION"
+
+      - name: Upload server archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: server-linux-${{ matrix.arch }}
+          path: release-cli/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
+  publish:
+    name: Publish main-build
+    needs: [version, mac, server]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      # The desktop updater reads main-build.json, so it is uploaded last, after every file it names.
+      - name: Write checksums and manifest
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          zip=$(ls -- *-arm64.zip)
+          sha256sum -- * > SHA256SUMS.txt
+          jq -n \
+            --arg version "$VERSION" \
+            --arg commit "$GITHUB_SHA" \
+            --arg publishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg name "$zip" \
+            --arg sha256 "$(sha256sum -- "$zip" | cut -d' ' -f1)" \
+            --argjson size "$(stat -c%s -- "$zip")" \
+            '{version: $version, commit: $commit, publishedAt: $publishedAt,
+              files: {"darwin-arm64": {name: $name, sha256: $sha256, size: $size}}}' > main-build.json
+          cat main-build.json SHA256SUMS.txt
+
+      - name: Publish
+        shell: bash
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          files=()
+          for file in *; do [[ "$file" == main-build.json ]] || files+=("$file"); done
+          gh release create "$RELEASE_TAG" "${files[@]}" \
+            --repo "$GITHUB_REPOSITORY" --prerelease --latest=false --target "$GITHUB_SHA" \
+            --title "Latest main build ($VERSION)" \
+            --notes "Apple Silicon app and Linux server archives of \`main\` at $GITHUB_SHA. Ad-hoc signed and not notarized. See docs/operations/fork-main-build.md."
+          gh release upload "$RELEASE_TAG" main-build.json --repo "$GITHUB_REPOSITORY"

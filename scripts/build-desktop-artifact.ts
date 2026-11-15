@@ -2811,7 +2811,14 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   const updateChannel = resolveDesktopUpdateChannel(version);
   // Missing publish config infers a GitHub feed from tokens; staging has no repository, so manifest generation would crash.
   buildConfig.publish = null;
-  if (!isDesktopPreviewVersion(version)) {
+  // [fork:lockdown] The fork's main-build workflow bakes its own feed; the desktop updater
+  // recognizes that exact URL (apps/desktop/src/electron/ElectronForkUpdater.ts).
+  const forkFeedUrl = Option.getOrUndefined(
+    yield* Config.String("T3CODE_DESKTOP_UPDATE_FEED_URL").pipe(Config.option),
+  )?.trim();
+  if (forkFeedUrl) {
+    buildConfig.publish = [{ provider: "generic", url: forkFeedUrl }];
+  } else if (!isDesktopPreviewVersion(version)) {
     const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
       buildConfig.publish = [publishConfig];

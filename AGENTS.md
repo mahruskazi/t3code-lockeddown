@@ -123,6 +123,7 @@ Every outbound path this fork has, and what it may carry. A path that is not on 
 | npm registry or GitHub release archives, at runtime                                                                  | No, but pulls executable code onto the machine                                  | **Removed** — invariants 2 and 3                                                                                                                                                                                                       |
 | ACP Registry agents (`cdn.agentclientprotocol.com`, then archives, npm, PyPI)                                        | Yes — the agent it installs runs every turn                                     | **Removed** — invariant 2                                                                                                                                                                                                              |
 | Managed Codex and Antigravity installs (GitHub releases, `storage.googleapis.com`)                                   | No, but are executables                                                         | Pinned version and hash in the source, fetched only when the operator picks managed setup. Upstream follows the vendors' latest releases; this fork does not. See the note below                                                       |
+| Fork desktop updates (this repository's `main-build` release on `github.com`)                                        | No, but the desktop app installs the builds it serves                           | macOS fork builds only, user-triggered; sha256, codesign, bundle id and version checked before install. See the note below (`apps/desktop/src/electron/ElectronForkUpdater.ts`)                                                        |
 | Headless preview browser (Chrome for Testing, `storage.googleapis.com`)                                              | No, but is an executable                                                        | Pinned version, sha256 in the source, fetched the first time the server-side browser is used (`apps/server/src/preview/PreviewBrowser.ts`)                                                                                             |
 | Link and tab favicons (Google's `s2/favicons`)                                                                       | No — but every public hostname that appears in a chat link or browser tab       | **Removed** — `faviconUrlForOrigin` returns nothing (`packages/shared/src/favicon.ts`, `[fork:lockdown]`)                                                                                                                              |
 | Provider update checks (`registry.npmjs.org`, Homebrew, `api.meta.ai`, `downloads.claude.ai`, `releases.openai.com`) | No — a package name and the installed channel                                   | Version lookups, gated by the provider-update-check setting (`packages/provider-core/src/server/maintenanceResolver.ts`)                                                                                                               |
@@ -179,6 +180,15 @@ audit. Tripwires: `CodexInstallation.test.ts`, `antigravityCliRelease.test.ts`.
 The server-side headless browser (`apps/server/src/preview/PreviewBrowser.ts`) is the same shape, a
 pinned Chrome for Testing build, except that it installs on first use, so an agent driving the browser
 can trigger the download.
+
+**The fork's macOS app updates itself from `main-build`.** `.github/workflows/fork-main-build.yml`
+publishes ad-hoc signed builds to a rolling prerelease of this repository, and a build carrying that
+feed in `app-update.yml` downloads and installs the next one when the user clicks update
+(`[fork:lockdown]`). This is a deliberate, maintainer-approved exception to "no executable code from
+the network": the bytes come only from this repository's own CI at a URL fixed in the source, and are
+verified against the release manifest and the running app's bundle id before the swap. Server
+self-update and remote hosts are unchanged (invariants 2 and 3). See
+[Fork main build](docs/operations/fork-main-build.md).
 
 **Webhook automations take input from anyone holding the URL.** A scheduled task can be triggered by
 `/api/hooks/<hookId>/<token>`, directly or through the T3 Connect relay. The token is the only
