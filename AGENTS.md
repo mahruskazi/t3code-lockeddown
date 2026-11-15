@@ -266,11 +266,12 @@ configured endpoint. That is code leaving outside a harness, so the drivers refu
 to a local URL; the settings page still exists, and every check fails with a message pointing back to a
 coding agent. Tripwire: `TextGenerators.test.ts`.
 
-**Upstream's `cursor-hygiene-webhook` workflow is not carried here.** It POSTs the full GitHub event
-payload — PR titles and bodies, issue and discussion text — to a Cursor webhook on every push, PR,
-issue and discussion. It no-ops without its two secrets, so it was inert, but it forwards this
-repository's activity to a third party the moment anyone sets them. Deleted on sync; delete it again
-if a future merge brings it back.
+**Upstream's GitHub workflows are not carried here.** The only workflow is
+`fork-main-build.yml`; upstream's CI, release, preview, mobile and moderation workflows (and the
+`.github/scripts` and actions only they used) are deleted. One of them, `cursor-hygiene-webhook`,
+POSTed every push, PR, issue and discussion payload to a Cursor webhook. A sync that touches a
+deleted workflow conflicts; resolve it by deleting the file again, and audit any new one before it
+lands.
 
 ### The invariants
 

@@ -11,8 +11,6 @@
       "entry": [
         // CodeRabbit loads its configuration by filename.
         ".coderabbit.config.ts",
-        ".github/scripts/thread-transfer-report.cjs",
-        ".github/scripts/pr-limits.cjs",
       ],
       "vite": { "entry": [".github/**/*.test.cjs"] },
       "vitest": { "entry": [".github/**/*.test.cjs"] },
@@ -35,6 +33,8 @@
         // e2e loads its config and the scenarios by path, and starts the app script.
         "e2e.config.ts",
         "prove-scenario.ts",
+        // release-smoke.ts runs it by path.
+        "resolve-nightly-release.ts",
         "scenarios/*.ts",
         "setup-worktree.ts",
         "sign-macos.ts",
