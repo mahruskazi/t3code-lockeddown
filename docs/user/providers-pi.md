@@ -48,6 +48,10 @@ Switching providers uses portable conversation context. An extension's `todo_wri
 dialogs appear in the T3 Code composer, and the thread details context window follows Pi's own usage
 reporting while a response streams and after it settles.
 
+In **Plan** mode, Pi gets T3 Code's planning instructions, edits and writes are refused, and other
+tools that are not read-only ask first, even with **Full access**. The turn's final reply appears as
+the proposed plan.
+
 Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
 loads for the current workspace; selecting one uses Pi's native skill expansion.
 
@@ -85,8 +89,8 @@ threads.
 Background subagent extensions can report lifecycle changes with Pi's
 `appendEntry("t3-subagent", data)`. T3 Code shows these children in the shared Agents view,
 including progress and completion after the parent turn ends. These entries do not start a
-model turn or depend on formatted tool output. Each child gets its own thread showing its prompt
-and final result; the child's own tool calls stay inside Pi.
+model turn or depend on formatted tool output. Each child gets its own thread showing its prompt,
+the activity its extension reports, and its final result.
 
 The version 1 payload requires `version: 1`, `id`, the originating `toolCallId`, and `status`
 (`running`, `completed`, `failed`, or `interrupted`). The first entry must include `prompt`
@@ -94,6 +98,15 @@ and arrive after that tool call starts in an active T3 turn. Optional `title` an
 identify the child. Later entries reuse its identity and can update `progress` or `result`;
 `null` clears either field. T3 bounds progress to 200 characters and results to 10,000.
 Extensions should limit streaming updates and publish status changes immediately.
+
+An entry can also carry `activity`: the child's new or changed transcript items since its last
+entry. Each item has a stable `id` and a `kind` of `message` (with `text`) or `tool` (with
+`toolName`, `input`, `output`, and a `status` of `running`, `completed`, or `failed`). An item
+sent again with the same `id` updates it in place. Entries persist in the parent's session, so
+send only what changed.
+
+To let users stop a child from T3 Code, register a `t3-subagent-stop` extension command. T3
+sends `/t3-subagent-stop <id>`; end that child and report it with an `interrupted` entry.
 
 ## Troubleshooting
 

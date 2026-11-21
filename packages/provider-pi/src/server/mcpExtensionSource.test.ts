@@ -7,7 +7,11 @@ import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
 
-import { PI_T3_MCP_EXTENSION_SOURCE, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
+import {
+  PI_T3_INTERACTION_MODE_COMMAND,
+  PI_T3_MCP_EXTENSION_SOURCE,
+  PI_T3_SERVICE_TIER_COMMAND,
+} from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
 type RequestHook = (
@@ -520,6 +524,47 @@ describe("Pi tool discovery permissions", () => {
     const replaced = await toolCall!({ toolName: "tool_search", input: {} }, ctx);
     assert.equal(replaced?.block, true);
     assert.equal(confirmations.at(-1), "Allow tool_search?");
+  });
+
+  it("blocks file edits and asks before other changing tools while a turn is in Plan mode", async () => {
+    const bridge = await loadMcpBridge({ runtimeMode: "full-access" });
+    const hook = bridge.handlers.get("tool_call") as unknown as (
+      event: { toolName: string; input: unknown },
+      ctx: { ui: { confirm: (title: string) => Promise<boolean> } },
+    ) => Promise<{ block: true; reason: string } | undefined>;
+    const confirmations: string[] = [];
+    const ctx = {
+      ui: {
+        confirm: async (title: string) => {
+          confirmations.push(title);
+          return false;
+        },
+      },
+    };
+    const setMode = bridge.commands.get(PI_T3_INTERACTION_MODE_COMMAND)!;
+    const agentStart = bridge.handlers.get("before_agent_start")!;
+    const agentCtx = { ui: { notify: () => {} } };
+
+    await setMode("plan");
+    assert.include(
+      (await agentStart({ systemPrompt: "base" }, agentCtx))?.systemPrompt,
+      "T3 Code interaction mode: Plan",
+    );
+    assert.equal((await hook({ toolName: "edit", input: {} }, ctx))?.block, true);
+    assert.equal((await hook({ toolName: "write", input: {} }, ctx))?.block, true);
+    assert.deepEqual(confirmations, []);
+    assert.isUndefined(await hook({ toolName: "read", input: {} }, ctx));
+    assert.equal((await hook({ toolName: "bash", input: {} }, ctx))?.block, true);
+    assert.deepEqual(confirmations, ["Allow bash?"]);
+
+    await setMode("default");
+    assert.notInclude(
+      (await agentStart({ systemPrompt: "base" }, agentCtx))?.systemPrompt,
+      "T3 Code interaction mode: Plan",
+    );
+    assert.isUndefined(await hook({ toolName: "edit", input: {} }, ctx));
+    assert.isUndefined(await hook({ toolName: "bash", input: {} }, ctx));
+    assert.equal(confirmations.length, 1);
   });
 
   it("gives long inputs that differ past the shown text different confirmation details", async () => {

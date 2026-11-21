@@ -25,6 +25,7 @@ import {
   type OrchestrationV2UserInputQuestion,
   type ProviderApprovalDecision,
   type ProviderInstanceId,
+  type ProviderInteractionMode,
   type MessageId,
   type NodeId,
   type ThreadId,
@@ -88,14 +89,21 @@ import {
   materializePiT3McpExtension,
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
-import { PI_FILE_CHANGE_TOOLS, PI_T3_SERVICE_TIER_COMMAND } from "./mcpExtensionSource.ts";
+import {
+  PI_FILE_CHANGE_TOOLS,
+  PI_T3_INTERACTION_MODE_COMMAND,
+  PI_T3_SERVICE_TIER_COMMAND,
+} from "./mcpExtensionSource.ts";
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
 import {
+  PI_SUBAGENT_STOP_COMMAND,
   piBackgroundSubagentEntryUpdate,
+  type PiBackgroundSubagentActivity,
   type PiBackgroundSubagentUpdate,
 } from "./backgroundSubagents.ts";
 import { PI_USER_INPUT_PREFIX, piStructuredAnswers, piStructuredQuestions } from "./userInput.ts";
 import { PI_TODO_TOOL, piTodoSteps } from "./todos.ts";
+import { piBackgroundCommand, piWebSearchItem } from "./extensionTools.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -174,7 +182,7 @@ const PiProviderCapabilitiesV2 = {
   planning: {
     emitsPlanUpdated: false,
     emitsTodoList: true,
-    emitsProposedPlan: false,
+    emitsProposedPlan: true,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
@@ -183,7 +191,7 @@ const PiProviderCapabilitiesV2 = {
     exposesSubagentThreadIds: true,
     emitsSubagentLifecycle: true,
     canWaitForSubagents: false,
-    canCloseSubagents: false,
+    canCloseSubagents: true,
     canForkSubagentThread: false,
   },
   context: {
@@ -458,13 +466,17 @@ interface PiPromptSend {
   readonly messageId?: MessageId;
 }
 
-/** The T3 thread a background child's prompt and result are shown in. */
+/** The T3 thread a background child's prompt, activity and result are shown in. */
 interface PiSubagentChild {
   readonly threadId: ThreadId;
   readonly parentThreadId: ThreadId;
   readonly rootNodeId: NodeId;
   readonly createdAt: DateTime.Utc;
+  /** Child item ordinals by native key, so updates keep their place. */
+  readonly ordinals: Map<string, number>;
+  readonly itemStartedAt: Map<string, DateTime.Utc>;
   resultShown: string | null;
+  lastMessageText: string | null;
 }
 
 interface PiThreadState {
@@ -723,6 +735,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       // Pi reloads extensions (resetting the tier) on paths the adapter cannot see, so a chosen tier
       // is resent every turn; Standard sends a clear only when an earlier tier may still be set.
       let serviceTierMayBeSet = false;
+      // Resent each Plan turn for the same reason; Default clears only when Plan may still be set.
+      let planModeMayBeSet = false;
       let appliedSessionName: string | null = null;
       const outOfTurnExtensionErrors: Array<PiRpcRecord> = [];
       let lastKnownLeaf: string | null = null;
@@ -1442,6 +1456,43 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           status,
           completedAt: completed ? emittedAt : null,
         } as const;
+        const backgroundCommand = piBackgroundCommand(
+          toolName,
+          args,
+          recordField(resultRecord, "details"),
+        );
+        if (backgroundCommand !== null) {
+          yield* emit({
+            type: "turn_item.updated",
+            driver: PI_PROVIDER,
+            turnItem: {
+              ...shared,
+              title: toolName,
+              type: "command_execution",
+              input: backgroundCommand.command,
+              ...(outputText.length > 0 ? { output: outputText } : {}),
+              ...(backgroundCommand.exitCode === undefined
+                ? {}
+                : { exitCode: backgroundCommand.exitCode }),
+            },
+          });
+          return;
+        }
+        const webSearch = piWebSearchItem(toolName, args, completed && !isError ? outputText : "");
+        if (webSearch !== null) {
+          yield* emit({
+            type: "turn_item.updated",
+            driver: PI_PROVIDER,
+            turnItem: {
+              ...shared,
+              title: toolName,
+              type: "web_search",
+              patterns: [...webSearch.patterns],
+              ...(webSearch.results === undefined ? {} : { results: [...webSearch.results] }),
+            },
+          });
+          return;
+        }
         if (toolName === "bash" || toolName === "powershell") {
           const exitCode =
             recordNumber(recordField(resultRecord, "structuredContent"), "exit_code") ??
@@ -1588,14 +1639,23 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         state.latestTodoList = plan;
       });
 
+      const childOrdinal = (child: PiSubagentChild, key: string) => {
+        const existing = child.ordinals.get(key);
+        if (existing !== undefined) return existing;
+        const ordinal = child.ordinals.size + 1;
+        child.ordinals.set(key, ordinal);
+        return ordinal;
+      };
+
       const emitSubagentChildMessage = Effect.fnUntraced(function* (
         child: PiSubagentChild,
         nativeTaskId: string,
         role: "user" | "assistant",
         text: string,
         now: DateTime.Utc,
+        key: string = role === "user" ? "prompt" : "result",
       ) {
-        const nativeItemId = `${nativeTaskId}:${role === "user" ? "prompt" : "result"}`;
+        const nativeItemId = `${nativeTaskId}:${key}`;
         const artifacts = makeSubagentConversationArtifacts({
           messageId: idAllocator.derive.messageFromProviderItem({
             driver: PI_PROVIDER,
@@ -1613,9 +1673,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           nativeItemRef: providerRef(nativeTaskId),
           role,
           text,
-          ordinal: role === "user" ? 1 : 2,
+          ordinal: childOrdinal(child, key),
           now,
         });
+        if (role === "assistant") child.lastMessageText = text.trim();
         yield* emit({ type: "message.updated", driver: PI_PROVIDER, message: artifacts.message });
         yield* emit({
           type: "turn_item.updated",
@@ -1624,8 +1685,57 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         });
       });
 
+      const emitSubagentChildActivity = Effect.fnUntraced(function* (
+        child: PiSubagentChild,
+        nativeTaskId: string,
+        activity: PiBackgroundSubagentActivity,
+        now: DateTime.Utc,
+      ) {
+        const key = `activity:${activity.id}`;
+        if (activity.kind === "message") {
+          if (activity.text === undefined || activity.text.trim().length === 0) return;
+          yield* emitSubagentChildMessage(
+            child,
+            nativeTaskId,
+            "assistant",
+            activity.text,
+            now,
+            key,
+          );
+          return;
+        }
+        const nativeItemId = `${nativeTaskId}:${key}`;
+        const startedAt = child.itemStartedAt.get(key) ?? now;
+        child.itemStartedAt.set(key, startedAt);
+        const status = activity.status ?? "completed";
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            id: idAllocator.derive.turnItemFromProviderItem({ driver: PI_PROVIDER, nativeItemId }),
+            threadId: child.threadId,
+            runId: null,
+            nodeId: child.rootNodeId,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: providerRef(nativeItemId),
+            parentItemId: null,
+            ordinal: childOrdinal(child, key),
+            status,
+            title: activity.toolName ?? null,
+            startedAt,
+            completedAt: status === "running" ? null : now,
+            updatedAt: now,
+            type: "dynamic_tool",
+            toolName: activity.toolName?.trim() || null,
+            input: activity.input ?? {},
+            ...(activity.output === undefined ? {} : { output: activity.output }),
+          },
+        });
+      });
+
       // Pi's children run in-process without a T3 provider thread, so their thread
-      // shows the prompt and result; the parent's tool calls carry the work itself.
+      // shows what the extension reports: the prompt, activity and result.
       const createBackgroundSubagentChild = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         nativeTaskId: string,
@@ -1649,7 +1759,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             nativeItemId: `${nativeTaskId}:thread-root`,
           }),
           createdAt: input.now,
+          ordinals: new Map(),
+          itemStartedAt: new Map(),
           resultShown: null,
+          lastMessageText: null,
         };
         yield* emit({
           type: "app_thread.created",
@@ -1741,11 +1854,16 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             completedAt,
           },
         });
+        for (const activity of observation.activity ?? []) {
+          yield* emitSubagentChildActivity(child, nativeTaskId, activity, emittedAt);
+        }
         if (
           finished &&
           result !== null &&
           result.trim().length > 0 &&
-          child.resultShown !== result
+          child.resultShown !== result &&
+          // The child's last reply usually is its result.
+          child.lastMessageText !== result.trim()
         ) {
           child.resultShown = result;
           yield* emitSubagentChildMessage(child, nativeTaskId, "assistant", result, emittedAt);
@@ -2403,6 +2521,71 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         };
       });
 
+      // A Plan turn's last reply is its plan, as Pi has no plan tool of its own.
+      const emitProposedPlan = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        completedAt: DateTime.Utc,
+      ) {
+        const markdown = Array.from(turn.streamItems.values())
+          .filter((item) => item.kind === "assistant_message")
+          .at(-1)
+          ?.text.trim();
+        if (markdown === undefined || markdown.length === 0) return;
+        const nativeItemId = `proposed_plan:${turn.providerTurn.id}`;
+        const base = baseItemFields(turn, nativeItemId, completedAt, completedAt);
+        const planId = yield* idAllocator.allocate
+          .plan({ threadId: base.threadId, runId: base.runId, driver: PI_PROVIDER })
+          .pipe(Effect.orDie);
+        yield* emit({
+          type: "node.updated",
+          driver: PI_PROVIDER,
+          node: {
+            id: base.nodeId,
+            threadId: base.threadId,
+            runId: base.runId,
+            parentNodeId: turn.turnInput.rootNodeId,
+            rootNodeId: turn.turnInput.rootNodeId,
+            kind: "plan",
+            status: "completed",
+            countsForRun: false,
+            providerThreadId: base.providerThreadId,
+            providerTurnId: base.providerTurnId,
+            nativeItemRef: base.nativeItemRef,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: completedAt,
+            completedAt,
+          },
+        });
+        yield* emit({
+          type: "plan.updated",
+          driver: PI_PROVIDER,
+          plan: {
+            id: planId,
+            threadId: base.threadId,
+            runId: base.runId,
+            nodeId: base.nodeId,
+            kind: "proposed_plan",
+            status: "active",
+            markdown,
+          },
+        });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...base,
+            status: "completed",
+            title: null,
+            completedAt,
+            type: "proposed_plan",
+            planId,
+            markdown,
+            streaming: false,
+          },
+        });
+      });
+
       const finalizeTurn = Effect.fnUntraced(function* (state: PiThreadState, readUsage = true) {
         const turn = state.activeTurn;
         if (turn === null) return;
@@ -2435,6 +2618,13 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           ? yield* readTokenUsage(turn.latestCompactionAfterTokens, completedAt)
           : undefined;
         const failure = interrupted ? null : (turn.rejectedPromptFailure ?? turn.failure);
+        if (
+          !interrupted &&
+          failure === null &&
+          turn.turnInput.runtimePolicy.interactionMode === "plan"
+        ) {
+          yield* emitProposedPlan(turn, completedAt);
+        }
         yield* emit({
           type: "provider_turn.updated",
           driver: PI_PROVIDER,
@@ -3697,6 +3887,23 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         }
       });
 
+      const applyInteractionMode = Effect.fnUntraced(function* (
+        interactionMode: ProviderInteractionMode,
+      ) {
+        const plan = interactionMode === "plan";
+        if (!plan && !planModeMayBeSet) return;
+        planModeMayBeSet = true;
+        const result = yield* request({
+          type: "prompt",
+          message: `/${PI_T3_INTERACTION_MODE_COMMAND} ${plan ? "plan" : "default"}`,
+        });
+        const disposition = recordString(result, "disposition");
+        if (disposition !== undefined && disposition !== "handled") {
+          return yield* protocolError("T3 Code's Pi extension did not apply the interaction mode");
+        }
+        planModeMayBeSet = plan;
+      });
+
       const resolvePromptPayload = Effect.fnUntraced(function* (
         text: string,
         attachments: ReadonlyArray<ChatAttachment>,
@@ -3819,6 +4026,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               turnInput.message.createdBy === "agent" &&
               turnInput.message.creationSource === "provider";
             if (!continuation) yield* applySelection(turnInput.modelSelection);
+            yield* applyInteractionMode(turnInput.runtimePolicy.interactionMode);
             if (turnInput.appThread.title !== appliedSessionName) {
               yield* request({
                 type: "set_session_name",
@@ -4115,6 +4323,28 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               ),
             ),
         ),
+        // The extension ends the child and reports it through its lifecycle entry.
+        stopSubagent: Effect.fn("PiAdapter.stopSubagent")(function* (stopInput) {
+          const running = [...(threadState?.backgroundSubagents.values() ?? [])].some(
+            (task) =>
+              task.identity.id === stopInput.nativeTaskId && task.subagent.status === "running",
+          );
+          if (!running) return;
+          const result = yield* request({
+            type: "prompt",
+            message: `/${PI_SUBAGENT_STOP_COMMAND} ${stopInput.nativeTaskId}`,
+          }).pipe(
+            Effect.mapError((cause) =>
+              protocolError(`Could not stop Pi subagent ${stopInput.nativeTaskId}`, cause),
+            ),
+          );
+          const disposition = recordString(result, "disposition");
+          if (disposition !== undefined && disposition !== "handled") {
+            return yield* protocolError(
+              `Pi's subagent extension does not provide /${PI_SUBAGENT_STOP_COMMAND}`,
+            );
+          }
+        }),
         respondToRuntimeRequest: Effect.fn("PiAdapter.respondToRuntimeRequest")(
           function* (requestInput) {
             const pending = pendingPrompts.get(String(requestInput.requestId));
