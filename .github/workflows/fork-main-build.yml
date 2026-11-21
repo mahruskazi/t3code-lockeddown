@@ -45,7 +45,7 @@ jobs:
   mac:
     name: macOS arm64 app
     needs: version
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
     env:
       VERSION: ${{ needs.version.outputs.version }}
