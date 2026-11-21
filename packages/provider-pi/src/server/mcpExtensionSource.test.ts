@@ -475,7 +475,9 @@ describe("Pi tool discovery permissions", () => {
       ),
     );
     await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
-      process: { env: { T3_PI_RUNTIME_MODE: "approval-required" } },
+      process: {
+        env: { T3_PI_RUNTIME_MODE: "approval-required", T3_PI_APPROVAL_EXEMPT_TOOLS: " fd, rg ,," },
+      },
       pi: {
         on: (name: string, handler: ToolCallHook) => {
           if (name === "tool_call") toolCall = handler;
@@ -503,7 +505,13 @@ describe("Pi tool discovery permissions", () => {
         await toolCall!({ toolName: "tool_search", input: { query: "preview_snapshot" } }, ctx),
       );
     }
+    for (const toolName of ["todo_write", "fd", "rg"]) {
+      assert.isUndefined(await toolCall!({ toolName, input: {} }, ctx));
+    }
     assert.equal(confirmations.length, 0);
+    assert.equal((await toolCall!({ toolName: "fdx", input: {} }, ctx))?.block, true);
+    assert.deepEqual(confirmations, ["Allow fdx?"]);
+    confirmations.length = 0;
     const result = await toolCall!({ toolName: "mcp__t3-code__preview_snapshot", input: {} }, ctx);
     assert.equal(result?.block, true);
     assert.deepEqual(confirmations, ["Allow mcp__t3-code__preview_snapshot?"]);

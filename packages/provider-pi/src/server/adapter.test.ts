@@ -3702,14 +3702,31 @@ describe("PiAdapterV2", () => {
           model: "openai/test",
         }),
       );
+      const childThread = yield* takeEvent((e) => e.type === "app_thread.created");
+      if (childThread.type !== "app_thread.created") return assert.fail("Expected a child thread");
+      assert.equal(childThread.appThread.title, "Scout");
+      assert.equal(childThread.appThread.lineage.parentThreadId, THREAD_ID);
+      assert.equal(childThread.appThread.lineage.relationshipToParent, "subagent");
+      const childPrompt = yield* takeEvent((e) => e.type === "message.updated");
+      assert.isTrue(
+        childPrompt.type === "message.updated" &&
+          childPrompt.message.threadId === childThread.appThread.id &&
+          childPrompt.message.role === "user" &&
+          childPrompt.message.text === "Inspect the repo",
+      );
       const spawned = yield* takeEvent((e) => e.type === "subagent.updated");
       if (spawned.type !== "subagent.updated") return assert.fail("Expected a subagent");
       assert.equal(spawned.subagent.status, "running");
       assert.equal(spawned.subagent.prompt, "Inspect the repo");
       assert.equal(spawned.subagent.model, "openai/test");
-      assert.isNull(spawned.subagent.childThreadId);
+      assert.equal(spawned.subagent.childThreadId, childThread.appThread.id);
       const spawnedItem = yield* takeEvent(
         (e) => e.type === "turn_item.updated" && e.turnItem.type === "subagent",
+      );
+      assert.isTrue(
+        spawnedItem.type === "turn_item.updated" &&
+          spawnedItem.turnItem.type === "subagent" &&
+          spawnedItem.turnItem.childThreadId === childThread.appThread.id,
       );
       yield* takeEvent(
         (e) =>
@@ -3767,6 +3784,14 @@ describe("PiAdapterV2", () => {
           progress: null,
           result: "Tests passed",
         }),
+      );
+      const childResult = yield* takeEvent(
+        (e) => e.type === "message.updated" && e.message.role === "assistant",
+      );
+      assert.isTrue(
+        childResult.type === "message.updated" &&
+          childResult.message.threadId === childThread.appThread.id &&
+          childResult.message.text === "Tests passed",
       );
       const completed = yield* takeEvent(
         (e) => e.type === "subagent.updated" && e.subagent.status === "completed",
@@ -4225,6 +4250,76 @@ describe("PiAdapterV2", () => {
         statuses: ["completed", "failed"],
         pending: [false],
       });
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect("projects todo_write calls as a checklist that supersedes the previous one", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const { runtime, takeEvent } = yield* openRuntime(fake);
+      const providerThread = yield* runtime.ensureThread({
+        threadId: THREAD_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+      });
+      yield* startTurn(runtime, providerThread);
+      yield* fake.takeRequest("prompt");
+      yield* fake.emit({ type: "agent_start" });
+      const writeTodos = (toolCallId: string, statuses: ReadonlyArray<string>, isError = false) =>
+        Effect.gen(function* () {
+          const args = {
+            todos: statuses.map((status, index) => ({ content: `Step ${index + 1}`, status })),
+          };
+          yield* fake.emit({
+            type: "tool_execution_start",
+            toolCallId,
+            toolName: "todo_write",
+            args,
+          });
+          yield* fake.emit({
+            type: "tool_execution_end",
+            toolCallId,
+            toolName: "todo_write",
+            isError,
+            result: { content: [{ type: "text", text: "ok" }] },
+          });
+        });
+      yield* writeTodos("todos-1", ["in_progress", "pending"]);
+      const first = yield* takeEvent((e) => e.type === "plan.updated");
+      if (first.type !== "plan.updated" || first.plan.kind !== "todo_list")
+        return assert.fail("Expected a todo list");
+      assert.equal(first.plan.status, "active");
+      assert.deepEqual(
+        first.plan.steps.map((step) => [step.text, step.status]),
+        [
+          ["Step 1", "running"],
+          ["Step 2", "pending"],
+        ],
+      );
+      const item = yield* takeEvent(
+        (e) => e.type === "turn_item.updated" && e.turnItem.type === "todo_list",
+      );
+      assert.isTrue(
+        item.type === "turn_item.updated" &&
+          item.turnItem.type === "todo_list" &&
+          item.turnItem.planId === first.plan.id,
+      );
+
+      // A failed call does not replace the list.
+      yield* writeTodos("todos-bad", ["completed"], true);
+      yield* writeTodos("todos-2", ["completed", "completed"]);
+      const superseded = yield* takeEvent((e) => e.type === "plan.updated");
+      assert.isTrue(
+        superseded.type === "plan.updated" &&
+          superseded.plan.id === first.plan.id &&
+          superseded.plan.status === "superseded",
+      );
+      const second = yield* takeEvent((e) => e.type === "plan.updated");
+      assert.isTrue(
+        second.type === "plan.updated" &&
+          second.plan.id !== first.plan.id &&
+          second.plan.status === "completed",
+      );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 

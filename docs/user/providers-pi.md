@@ -43,7 +43,8 @@ a speed picker with Standard plus those tiers. A chosen tier is sent as the requ
 `service_tier`; Standard sends none and leaves the endpoint's default. Threads
 use Pi's native session files for resume, rollback, and forks within the same Pi instance. Forks
 preserve the native conversation through the selected turn in the destination workspace.
-Switching providers uses portable conversation context. Extension
+Switching providers uses portable conversation context. An extension's `todo_write` tool, taking Claude's TodoWrite shape
+(`{ todos: [{ content, status }] }`), shows as the thread's checklist. Extension
 dialogs appear in the T3 Code composer, and the thread details context window follows Pi's own usage
 reporting while a response streams and after it settles.
 
@@ -64,6 +65,11 @@ T3 Code applies the composer permission mode through Pi's blocking tool hook:
   tools.
 - **Full access** allows tools without T3 Code approval prompts.
 
+Checklist updates from a `todo_write` tool never ask. To let other extension tools you trust run
+without prompts, such as read-only search tools, list their names in the Pi instance's
+`T3_PI_APPROVAL_EXEMPT_TOOLS` environment variable, separated by commas (for example
+`fd,rg,ask_user`). T3 Code does not check what a listed tool does.
+
 The **Auto** option is not shown for Pi because Pi does not expose an AI approval reviewer.
 Threads that already stored Auto before Pi support was added behave and display as Supervised.
 
@@ -79,8 +85,8 @@ threads.
 Background subagent extensions can report lifecycle changes with Pi's
 `appendEntry("t3-subagent", data)`. T3 Code shows these children in the shared Agents view,
 including progress and completion after the parent turn ends. These entries do not start a
-model turn or depend on formatted tool output. Children without T3 Code threads cannot be
-opened or resumed from that view.
+model turn or depend on formatted tool output. Each child gets its own thread showing its prompt
+and final result; the child's own tool calls stay inside Pi.
 
 The version 1 payload requires `version: 1`, `id`, the originating `toolCallId`, and `status`
 (`running`, `completed`, `failed`, or `interrupted`). The first entry must include `prompt`

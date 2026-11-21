@@ -10,6 +10,8 @@ import {
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
+  type OrchestrationV2PlanStep,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
@@ -24,6 +26,8 @@ import {
   type ProviderApprovalDecision,
   type ProviderInstanceId,
   type MessageId,
+  type NodeId,
+  type ThreadId,
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import { PiSettings } from "../settings.ts";
@@ -47,6 +51,11 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
+import {
+  makeSubagentChildThread,
+  makeSubagentConversationArtifacts,
+  subagentThreadTitle,
+} from "@t3tools/provider-core/server/subagentProjection";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -86,6 +95,7 @@ import {
   type PiBackgroundSubagentUpdate,
 } from "./backgroundSubagents.ts";
 import { PI_USER_INPUT_PREFIX, piStructuredAnswers, piStructuredQuestions } from "./userInput.ts";
+import { PI_TODO_TOOL, piTodoSteps } from "./todos.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -163,14 +173,14 @@ const PiProviderCapabilitiesV2 = {
   },
   planning: {
     emitsPlanUpdated: false,
-    emitsTodoList: false,
+    emitsTodoList: true,
     emitsProposedPlan: false,
     supportsStructuredQuestions: true,
     planDeltasHaveItemIds: false,
   },
   subagents: {
     supportsSubagents: true,
-    exposesSubagentThreadIds: false,
+    exposesSubagentThreadIds: true,
     emitsSubagentLifecycle: true,
     canWaitForSubagents: false,
     canCloseSubagents: false,
@@ -448,6 +458,15 @@ interface PiPromptSend {
   readonly messageId?: MessageId;
 }
 
+/** The T3 thread a background child's prompt and result are shown in. */
+interface PiSubagentChild {
+  readonly threadId: ThreadId;
+  readonly parentThreadId: ThreadId;
+  readonly rootNodeId: NodeId;
+  readonly createdAt: DateTime.Utc;
+  resultShown: string | null;
+}
+
 interface PiThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActivePiTurn | null;
@@ -457,10 +476,12 @@ interface PiThreadState {
       readonly identity: { readonly id: string; readonly toolCallId: string };
       readonly subagent: OrchestrationV2Subagent;
       readonly item: Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
+      readonly child: PiSubagentChild;
     }
   >;
   /** Files an extension moved this thread off (ctx.newSession); queued turns may still name them. */
   readonly supersededSessionFiles: Set<string>;
+  latestTodoList: Extract<OrchestrationV2PlanArtifact, { kind: "todo_list" }> | null;
 }
 
 const isLiveSessionOf = (state: PiThreadState, nativeId: string | null | undefined) =>
@@ -1490,6 +1511,171 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         if (toolName === "subagent") {
           yield* emitSubagentTasks(turn, toolCallId, resultRecord, completed);
         }
+        if (toolName === PI_TODO_TOOL && completed && !isError && parentToolCallId === undefined) {
+          const steps = piTodoSteps(args);
+          if (steps !== null) yield* emitTodoList(turn, toolCallId, steps);
+        }
+      });
+
+      // Each call replaces the checklist, as Claude's TodoWrite does: the previous list is superseded.
+      const emitTodoList = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        toolCallId: string,
+        steps: ReadonlyArray<OrchestrationV2PlanStep>,
+      ) {
+        const state = threadState;
+        if (state === null) return;
+        const updatedAt = yield* DateTime.now;
+        const nativeItemId = `todo_list:${toolCallId}`;
+        const base = baseItemFields(turn, nativeItemId, updatedAt, updatedAt);
+        const planId = yield* idAllocator.allocate
+          .plan({ threadId: base.threadId, runId: base.runId, driver: PI_PROVIDER })
+          .pipe(Effect.orDie);
+        const plan = {
+          id: planId,
+          threadId: base.threadId,
+          runId: base.runId,
+          nodeId: base.nodeId,
+          kind: "todo_list" as const,
+          status: steps.every((step) => step.status === "completed")
+            ? ("completed" as const)
+            : ("active" as const),
+          steps: [...steps],
+        };
+        const previous = state.latestTodoList;
+        if (previous !== null && previous.id !== plan.id) {
+          yield* emit({
+            type: "plan.updated",
+            driver: PI_PROVIDER,
+            plan: { ...previous, status: "superseded" },
+          });
+        }
+        yield* emit({
+          type: "node.updated",
+          driver: PI_PROVIDER,
+          node: {
+            id: base.nodeId,
+            threadId: base.threadId,
+            runId: base.runId,
+            parentNodeId: turn.turnInput.rootNodeId,
+            rootNodeId: turn.turnInput.rootNodeId,
+            kind: "todo_list",
+            status: "completed",
+            countsForRun: false,
+            providerThreadId: base.providerThreadId,
+            providerTurnId: base.providerTurnId,
+            nativeItemRef: base.nativeItemRef,
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: updatedAt,
+            completedAt: updatedAt,
+          },
+        });
+        yield* emit({ type: "plan.updated", driver: PI_PROVIDER, plan });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...base,
+            status: "completed",
+            title: null,
+            completedAt: updatedAt,
+            type: "todo_list",
+            planId,
+            steps: plan.steps,
+          },
+        });
+        state.latestTodoList = plan;
+      });
+
+      const emitSubagentChildMessage = Effect.fnUntraced(function* (
+        child: PiSubagentChild,
+        nativeTaskId: string,
+        role: "user" | "assistant",
+        text: string,
+        now: DateTime.Utc,
+      ) {
+        const nativeItemId = `${nativeTaskId}:${role === "user" ? "prompt" : "result"}`;
+        const artifacts = makeSubagentConversationArtifacts({
+          messageId: idAllocator.derive.messageFromProviderItem({
+            driver: PI_PROVIDER,
+            nativeItemId,
+          }),
+          ...(role === "user" ? { senderThreadId: child.parentThreadId } : {}),
+          turnItemId: idAllocator.derive.turnItemFromProviderItem({
+            driver: PI_PROVIDER,
+            nativeItemId,
+          }),
+          threadId: child.threadId,
+          rootNodeId: child.rootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: providerRef(nativeTaskId),
+          role,
+          text,
+          ordinal: role === "user" ? 1 : 2,
+          now,
+        });
+        yield* emit({ type: "message.updated", driver: PI_PROVIDER, message: artifacts.message });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: artifacts.turnItem,
+        });
+      });
+
+      // Pi's children run in-process without a T3 provider thread, so their thread
+      // shows the prompt and result; the parent's tool calls carry the work itself.
+      const createBackgroundSubagentChild = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        nativeTaskId: string,
+        parentNodeId: NodeId,
+        input: {
+          readonly title: string | null;
+          readonly prompt: string;
+          readonly ordinal: number;
+          readonly now: DateTime.Utc;
+        },
+      ) {
+        const child: PiSubagentChild = {
+          threadId: idAllocator.derive.subagentThread({
+            driver: PI_PROVIDER,
+            providerInstanceId: options.instanceId,
+            nativeThreadId: `${turn.turnInput.providerThread.id}:${nativeTaskId}`,
+          }),
+          parentThreadId: turn.turnInput.threadId,
+          rootNodeId: idAllocator.derive.nodeFromProviderItem({
+            driver: PI_PROVIDER,
+            nativeItemId: `${nativeTaskId}:thread-root`,
+          }),
+          createdAt: input.now,
+          resultShown: null,
+        };
+        yield* emit({
+          type: "app_thread.created",
+          driver: PI_PROVIDER,
+          appThread: makeSubagentChildThread({
+            parentThread: turn.turnInput.appThread,
+            childThreadId: child.threadId,
+            parentNodeId,
+            activeProviderThreadId: null,
+            providerInstanceId: options.instanceId,
+            modelSelection: turn.turnInput.modelSelection,
+            title: subagentThreadTitle({
+              parentTitle: turn.turnInput.appThread.title,
+              title: input.title,
+              prompt: input.prompt,
+              ordinal: input.ordinal,
+            }),
+            now: input.now,
+            createdBy: "agent",
+            creationSource: "provider",
+          }),
+        });
+        if (input.prompt.trim().length > 0) {
+          yield* emitSubagentChildMessage(child, nativeTaskId, "user", input.prompt, input.now);
+        }
+        return child;
       });
 
       const emitBackgroundSubagent = Effect.fnUntraced(function* (
@@ -1524,6 +1710,46 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             : (observation.progress ?? undefined);
         const result =
           observation.result === undefined ? (prior?.subagent.result ?? null) : observation.result;
+        const title = observation.title ?? prior?.subagent.title ?? null;
+        const prompt = observation.prompt ?? prior?.subagent.prompt ?? "";
+        const child =
+          prior?.child ??
+          (yield* createBackgroundSubagentChild(source!.turn, nativeTaskId, base.nodeId, {
+            title,
+            prompt,
+            ordinal: state.backgroundSubagents.size + 1,
+            now: emittedAt,
+          }));
+        yield* emit({
+          type: "node.updated",
+          driver: PI_PROVIDER,
+          node: {
+            id: child.rootNodeId,
+            threadId: child.threadId,
+            runId: null,
+            parentNodeId: null,
+            rootNodeId: child.rootNodeId,
+            kind: "root_turn",
+            status: observation.status,
+            countsForRun: false,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: providerRef(nativeTaskId),
+            runtimeRequestId: null,
+            checkpointScopeId: null,
+            startedAt: child.createdAt,
+            completedAt,
+          },
+        });
+        if (
+          finished &&
+          result !== null &&
+          result.trim().length > 0 &&
+          child.resultShown !== result
+        ) {
+          child.resultShown = result;
+          yield* emitSubagentChildMessage(child, nativeTaskId, "assistant", result, emittedAt);
+        }
         const subagent: OrchestrationV2Subagent = {
           id: base.nodeId,
           threadId: base.threadId,
@@ -1540,10 +1766,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           driver: PI_PROVIDER,
           providerInstanceId: options.instanceId,
           providerThreadId: base.providerThreadId,
-          childThreadId: null,
+          childThreadId: child.threadId,
           nativeTaskRef: providerRef(observation.id),
-          title: observation.title ?? prior?.subagent.title ?? null,
-          prompt: observation.prompt ?? prior?.subagent.prompt ?? "",
+          title,
+          prompt,
           model:
             observation.model === undefined ? (prior?.subagent.model ?? null) : observation.model,
           status: observation.status,
@@ -1561,7 +1787,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           origin: "provider_native",
           driver: PI_PROVIDER,
           providerInstanceId: options.instanceId,
-          childThreadId: null,
+          childThreadId: child.threadId,
           prompt: subagent.prompt,
           status: subagent.status,
           progress,
@@ -1573,6 +1799,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           identity: { id: observation.id, toolCallId: observation.toolCallId },
           subagent,
           item,
+          child,
         });
         for (const [id, task] of state.backgroundSubagents) {
           if (state.backgroundSubagents.size <= 128) break;
@@ -3346,6 +3573,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               activeTurn: null,
               backgroundSubagents: new Map(),
               supersededSessionFiles: new Set(),
+              latestTodoList: null,
             };
           }
           const baselineEntries = yield* request({ type: "get_entries" }).pipe(

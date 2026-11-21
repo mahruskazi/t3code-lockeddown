@@ -1,6 +1,7 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
+import { PI_TODO_TOOL } from "./todos.ts";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -9,6 +10,8 @@ export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 export const PI_T3_SERVICE_TIER_COMMAND = "t3-service-tier";
+// Comma-separated extension tools the operator trusts to run without approval prompts.
+const T3_PI_APPROVAL_EXEMPT_TOOLS_ENV = "T3_PI_APPROVAL_EXEMPT_TOOLS";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
@@ -29,6 +32,9 @@ const PULL_REQUEST_LINKING_INSTRUCTIONS = ${JSON.stringify(PULL_REQUEST_LINKING_
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+// A checklist update only changes what T3 shows.
+const UI_ONLY_TOOLS = new Set([${JSON.stringify(PI_TODO_TOOL)}]);
+const APPROVAL_EXEMPT_TOOLS_ENV = ${JSON.stringify(T3_PI_APPROVAL_EXEMPT_TOOLS_ENV)};
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
 
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
@@ -362,10 +368,19 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       NodePath.resolve(tool.sourceInfo.path) === NodePath.resolve(extensionPath));
   };
 
+  const exemptTools = new Set(
+    (env(APPROVAL_EXEMPT_TOOLS_ENV) ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0),
+  );
+
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
     if (mode === "full-access") return;
-    if ((event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) || isReadOnlyMcpTool(event.toolName)) {
+    if (
+      (event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) ||
+      UI_ONLY_TOOLS.has(event.toolName) ||
+      exemptTools.has(event.toolName) ||
+      isReadOnlyMcpTool(event.toolName)
+    ) {
       return;
     }
     if (mode === "auto-accept-edits" && FILE_CHANGE_TOOLS.has(event.toolName)) {
