@@ -27,8 +27,6 @@ import {
   type ProviderInstanceId,
   type ProviderInteractionMode,
   type MessageId,
-  type NodeId,
-  type ThreadId,
   type OrchestrationV2ProviderTurnTokenUsage,
 } from "@t3tools/contracts";
 import { PiSettings } from "../settings.ts";
@@ -52,11 +50,6 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
-import {
-  makeSubagentChildThread,
-  makeSubagentConversationArtifacts,
-  subagentThreadTitle,
-} from "@t3tools/provider-core/server/subagentProjection";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -95,12 +88,6 @@ import {
   PI_T3_SERVICE_TIER_COMMAND,
 } from "./mcpExtensionSource.ts";
 import { PI_STANDARD_SERVICE_TIER } from "./modelCapabilities.ts";
-import {
-  PI_SUBAGENT_STOP_COMMAND,
-  piBackgroundSubagentEntryUpdate,
-  type PiBackgroundSubagentActivity,
-  type PiBackgroundSubagentUpdate,
-} from "./backgroundSubagents.ts";
 import { PI_USER_INPUT_PREFIX, piStructuredAnswers, piStructuredQuestions } from "./userInput.ts";
 import { PI_TODO_TOOL, piTodoSteps } from "./todos.ts";
 import { piBackgroundCommand, piWebSearchItem } from "./extensionTools.ts";
@@ -188,10 +175,10 @@ const PiProviderCapabilitiesV2 = {
   },
   subagents: {
     supportsSubagents: true,
-    exposesSubagentThreadIds: true,
+    exposesSubagentThreadIds: false,
     emitsSubagentLifecycle: true,
     canWaitForSubagents: false,
-    canCloseSubagents: true,
+    canCloseSubagents: false,
     canForkSubagentThread: false,
   },
   context: {
@@ -466,31 +453,9 @@ interface PiPromptSend {
   readonly messageId?: MessageId;
 }
 
-/** The T3 thread a background child's prompt, activity and result are shown in. */
-interface PiSubagentChild {
-  readonly threadId: ThreadId;
-  readonly parentThreadId: ThreadId;
-  readonly rootNodeId: NodeId;
-  readonly createdAt: DateTime.Utc;
-  /** Child item ordinals by native key, so updates keep their place. */
-  readonly ordinals: Map<string, number>;
-  readonly itemStartedAt: Map<string, DateTime.Utc>;
-  resultShown: string | null;
-  lastMessageText: string | null;
-}
-
 interface PiThreadState {
   providerThread: OrchestrationV2ProviderThread;
   activeTurn: ActivePiTurn | null;
-  readonly backgroundSubagents: Map<
-    string,
-    {
-      readonly identity: { readonly id: string; readonly toolCallId: string };
-      readonly subagent: OrchestrationV2Subagent;
-      readonly item: Extract<OrchestrationV2TurnItem, { type: "subagent" }>;
-      readonly child: PiSubagentChild;
-    }
-  >;
   /** Files an extension moved this thread off (ctx.newSession); queued turns may still name them. */
   readonly supersededSessionFiles: Set<string>;
   latestTodoList: Extract<OrchestrationV2PlanArtifact, { kind: "todo_list" }> | null;
@@ -1639,305 +1604,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         state.latestTodoList = plan;
       });
 
-      const childOrdinal = (child: PiSubagentChild, key: string) => {
-        const existing = child.ordinals.get(key);
-        if (existing !== undefined) return existing;
-        const ordinal = child.ordinals.size + 1;
-        child.ordinals.set(key, ordinal);
-        return ordinal;
-      };
-
-      const emitSubagentChildMessage = Effect.fnUntraced(function* (
-        child: PiSubagentChild,
-        nativeTaskId: string,
-        role: "user" | "assistant",
-        text: string,
-        now: DateTime.Utc,
-        key: string = role === "user" ? "prompt" : "result",
-      ) {
-        const nativeItemId = `${nativeTaskId}:${key}`;
-        const artifacts = makeSubagentConversationArtifacts({
-          messageId: idAllocator.derive.messageFromProviderItem({
-            driver: PI_PROVIDER,
-            nativeItemId,
-          }),
-          ...(role === "user" ? { senderThreadId: child.parentThreadId } : {}),
-          turnItemId: idAllocator.derive.turnItemFromProviderItem({
-            driver: PI_PROVIDER,
-            nativeItemId,
-          }),
-          threadId: child.threadId,
-          rootNodeId: child.rootNodeId,
-          providerThreadId: null,
-          providerTurnId: null,
-          nativeItemRef: providerRef(nativeTaskId),
-          role,
-          text,
-          ordinal: childOrdinal(child, key),
-          now,
-        });
-        if (role === "assistant") child.lastMessageText = text.trim();
-        yield* emit({ type: "message.updated", driver: PI_PROVIDER, message: artifacts.message });
-        yield* emit({
-          type: "turn_item.updated",
-          driver: PI_PROVIDER,
-          turnItem: artifacts.turnItem,
-        });
-      });
-
-      const emitSubagentChildActivity = Effect.fnUntraced(function* (
-        child: PiSubagentChild,
-        nativeTaskId: string,
-        activity: PiBackgroundSubagentActivity,
-        now: DateTime.Utc,
-      ) {
-        const key = `activity:${activity.id}`;
-        if (activity.kind === "message") {
-          if (activity.text === undefined || activity.text.trim().length === 0) return;
-          yield* emitSubagentChildMessage(
-            child,
-            nativeTaskId,
-            "assistant",
-            activity.text,
-            now,
-            key,
-          );
-          return;
-        }
-        const nativeItemId = `${nativeTaskId}:${key}`;
-        const startedAt = child.itemStartedAt.get(key) ?? now;
-        child.itemStartedAt.set(key, startedAt);
-        const status = activity.status ?? "completed";
-        yield* emit({
-          type: "turn_item.updated",
-          driver: PI_PROVIDER,
-          turnItem: {
-            id: idAllocator.derive.turnItemFromProviderItem({ driver: PI_PROVIDER, nativeItemId }),
-            threadId: child.threadId,
-            runId: null,
-            nodeId: child.rootNodeId,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: providerRef(nativeItemId),
-            parentItemId: null,
-            ordinal: childOrdinal(child, key),
-            status,
-            title: activity.toolName ?? null,
-            startedAt,
-            completedAt: status === "running" ? null : now,
-            updatedAt: now,
-            type: "dynamic_tool",
-            toolName: activity.toolName?.trim() || null,
-            input: activity.input ?? {},
-            ...(activity.output === undefined ? {} : { output: activity.output }),
-          },
-        });
-      });
-
-      // Pi's children run in-process without a T3 provider thread, so their thread
-      // shows what the extension reports: the prompt, activity and result.
-      const createBackgroundSubagentChild = Effect.fnUntraced(function* (
-        turn: ActivePiTurn,
-        nativeTaskId: string,
-        parentNodeId: NodeId,
-        input: {
-          readonly title: string | null;
-          readonly prompt: string;
-          readonly ordinal: number;
-          readonly now: DateTime.Utc;
-        },
-      ) {
-        const child: PiSubagentChild = {
-          threadId: idAllocator.derive.subagentThread({
-            driver: PI_PROVIDER,
-            providerInstanceId: options.instanceId,
-            nativeThreadId: `${turn.turnInput.providerThread.id}:${nativeTaskId}`,
-          }),
-          parentThreadId: turn.turnInput.threadId,
-          rootNodeId: idAllocator.derive.nodeFromProviderItem({
-            driver: PI_PROVIDER,
-            nativeItemId: `${nativeTaskId}:thread-root`,
-          }),
-          createdAt: input.now,
-          ordinals: new Map(),
-          itemStartedAt: new Map(),
-          resultShown: null,
-          lastMessageText: null,
-        };
-        yield* emit({
-          type: "app_thread.created",
-          driver: PI_PROVIDER,
-          appThread: makeSubagentChildThread({
-            parentThread: turn.turnInput.appThread,
-            childThreadId: child.threadId,
-            parentNodeId,
-            activeProviderThreadId: null,
-            providerInstanceId: options.instanceId,
-            modelSelection: turn.turnInput.modelSelection,
-            title: subagentThreadTitle({
-              parentTitle: turn.turnInput.appThread.title,
-              title: input.title,
-              prompt: input.prompt,
-              ordinal: input.ordinal,
-            }),
-            now: input.now,
-            createdBy: "agent",
-            creationSource: "provider",
-          }),
-        });
-        if (input.prompt.trim().length > 0) {
-          yield* emitSubagentChildMessage(child, nativeTaskId, "user", input.prompt, input.now);
-        }
-        return child;
-      });
-
-      const emitBackgroundSubagent = Effect.fnUntraced(function* (
-        state: PiThreadState,
-        observation: PiBackgroundSubagentUpdate,
-        source?: { readonly turn: ActivePiTurn; readonly toolCallId: string },
-      ) {
-        const nativeTaskId = `${observation.toolCallId}:subagent:${observation.id}`;
-        const prior = state.backgroundSubagents.get(nativeTaskId);
-        // A new child must identify an observed tool call in the active turn.
-        // Later lifecycle entries retain that child's original owning run.
-        if (prior === undefined && (source === undefined || observation.prompt === undefined))
-          return;
-        const emittedAt = yield* DateTime.now;
-        const base =
-          prior?.item ??
-          (source === undefined
-            ? undefined
-            : baseItemFields(
-                source.turn,
-                nativeTaskId,
-                source.turn.toolStartedAt.get(source.toolCallId) ?? emittedAt,
-                emittedAt,
-              ));
-        if (base === undefined || base.nodeId === null) return;
-        const finished = observation.status !== "running";
-        const completedAt = finished ? (prior?.subagent.completedAt ?? emittedAt) : null;
-        const progress = finished
-          ? undefined
-          : observation.progress === undefined
-            ? prior?.subagent.progress
-            : (observation.progress ?? undefined);
-        const result =
-          observation.result === undefined ? (prior?.subagent.result ?? null) : observation.result;
-        const title = observation.title ?? prior?.subagent.title ?? null;
-        const prompt = observation.prompt ?? prior?.subagent.prompt ?? "";
-        const child =
-          prior?.child ??
-          (yield* createBackgroundSubagentChild(source!.turn, nativeTaskId, base.nodeId, {
-            title,
-            prompt,
-            ordinal: state.backgroundSubagents.size + 1,
-            now: emittedAt,
-          }));
-        yield* emit({
-          type: "node.updated",
-          driver: PI_PROVIDER,
-          node: {
-            id: child.rootNodeId,
-            threadId: child.threadId,
-            runId: null,
-            parentNodeId: null,
-            rootNodeId: child.rootNodeId,
-            kind: "root_turn",
-            status: observation.status,
-            countsForRun: false,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: providerRef(nativeTaskId),
-            runtimeRequestId: null,
-            checkpointScopeId: null,
-            startedAt: child.createdAt,
-            completedAt,
-          },
-        });
-        for (const activity of observation.activity ?? []) {
-          yield* emitSubagentChildActivity(child, nativeTaskId, activity, emittedAt);
-        }
-        if (
-          finished &&
-          result !== null &&
-          result.trim().length > 0 &&
-          child.resultShown !== result &&
-          // The child's last reply usually is its result.
-          child.lastMessageText !== result.trim()
-        ) {
-          child.resultShown = result;
-          yield* emitSubagentChildMessage(child, nativeTaskId, "assistant", result, emittedAt);
-        }
-        const subagent: OrchestrationV2Subagent = {
-          id: base.nodeId,
-          threadId: base.threadId,
-          runId: base.runId,
-          parentNodeId:
-            prior !== undefined
-              ? prior.subagent.parentNodeId
-              : idAllocator.derive.nodeFromProviderItem({
-                  driver: PI_PROVIDER,
-                  nativeItemId: source!.toolCallId,
-                }),
-          origin: "provider_native",
-          createdBy: "agent",
-          driver: PI_PROVIDER,
-          providerInstanceId: options.instanceId,
-          providerThreadId: base.providerThreadId,
-          childThreadId: child.threadId,
-          nativeTaskRef: providerRef(observation.id),
-          title,
-          prompt,
-          model:
-            observation.model === undefined ? (prior?.subagent.model ?? null) : observation.model,
-          status: observation.status,
-          ...(progress === undefined ? {} : { progress }),
-          result,
-          startedAt: base.startedAt,
-          completedAt,
-          updatedAt: emittedAt,
-        };
-        const item: Extract<OrchestrationV2TurnItem, { type: "subagent" }> = {
-          ...base,
-          type: "subagent",
-          subagentId: subagent.id,
-          title: subagent.title,
-          origin: "provider_native",
-          driver: PI_PROVIDER,
-          providerInstanceId: options.instanceId,
-          childThreadId: child.threadId,
-          prompt: subagent.prompt,
-          status: subagent.status,
-          progress,
-          result,
-          completedAt,
-          updatedAt: emittedAt,
-        };
-        state.backgroundSubagents.set(nativeTaskId, {
-          identity: { id: observation.id, toolCallId: observation.toolCallId },
-          subagent,
-          item,
-          child,
-        });
-        for (const [id, task] of state.backgroundSubagents) {
-          if (state.backgroundSubagents.size <= 128) break;
-          if (task.subagent.status !== "running") state.backgroundSubagents.delete(id);
-        }
-        yield* emit({ type: "subagent.updated", driver: PI_PROVIDER, subagent });
-        yield* emit({ type: "turn_item.updated", driver: PI_PROVIDER, turnItem: item });
-        const pendingBackgroundTasks = [...state.backgroundSubagents.entries()].flatMap(
-          ([taskId, task]) =>
-            task.subagent.status === "running" ? [{ taskId, kind: "subagent" as const }] : [],
-        );
-        const previousTasks = state.providerThread.pendingBackgroundTasks ?? [];
-        if (
-          pendingBackgroundTasks.length !== previousTasks.length ||
-          pendingBackgroundTasks.some((task, index) => task.taskId !== previousTasks[index]?.taskId)
-        ) {
-          yield* updateProviderThread(state, { pendingBackgroundTasks });
-        }
-      });
-
       const emitSubagentTasks = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         toolCallId: string,
@@ -2910,16 +2576,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             }
             return;
           }
-          case "entry_appended": {
-            const observation = piBackgroundSubagentEntryUpdate(event["entry"]);
-            if (state !== null && observation !== null) {
-              const source = turn?.toolArgs.has(observation.toolCallId)
-                ? { turn, toolCallId: observation.toolCallId }
-                : undefined;
-              yield* emitBackgroundSubagent(state, observation, source);
-            }
-            return;
-          }
           case "message_end": {
             if (turn === null) return;
             const message = event["message"];
@@ -3399,8 +3055,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             Effect.gen(function* () {
               runtimeRetired = true;
               const state = threadState;
-              // A session we closed interrupts its subagents; a transport that died fails them.
-              const closedByUs = closed;
               closed = true;
               if (pendingPromptResponsesDrained !== null)
                 yield* Deferred.fail(
@@ -3419,21 +3073,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
                 );
               pendingWake = null;
               const interrupted = state?.activeTurn?.interrupted === true;
-              if (state !== null) {
-                for (const task of state.backgroundSubagents.values()) {
-                  if (task.subagent.status !== "running") continue;
-                  yield* emitBackgroundSubagent(state, {
-                    version: 1,
-                    ...task.identity,
-                    status: interrupted || stopRequested || closedByUs ? "interrupted" : "failed",
-                    ...(interrupted || stopRequested || closedByUs
-                      ? {}
-                      : {
-                          result: "Pi exited before this subagent reported a result.",
-                        }),
-                  });
-                }
-              }
               if (state?.activeTurn != null) {
                 state.activeTurn.failure = interrupted
                   ? null
@@ -3619,25 +3258,19 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           if (threadState !== null && threadState.activeTurn !== null) {
             return yield* protocolError("Cannot register a Pi thread while a turn is active");
           }
-          if (
-            pendingWake !== null ||
-            (threadState?.providerThread.pendingBackgroundTasks?.length ?? 0) > 0
-          ) {
+          if (pendingWake !== null) {
             const state = threadState;
             if (
               state !== null &&
-              (pendingWake === null || state === pendingWake.state) &&
+              state === pendingWake.state &&
               state.providerThread.appThreadId === threadInput.threadId &&
               (threadInput.existingProviderThread === undefined ||
                 threadInput.existingProviderThread.nativeThreadRef?.nativeId ===
                   state.providerThread.nativeThreadRef?.nativeId)
-            ) {
-              // switch_session tears down extensions, including live children.
-              // Reuse the already bound session while its native work continues.
+            )
               return state.providerThread;
-            }
             return yield* protocolError(
-              "Cannot switch Pi threads while native work is running or awaiting a turn",
+              "Cannot switch Pi threads while native work is awaiting a turn",
             );
           }
           const existing = threadInput.existingProviderThread;
@@ -3714,7 +3347,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             existing !== undefined
               ? {
                   ...existing,
-                  pendingBackgroundTasks: [],
                   providerSessionId: input.providerSessionId,
                   nativeThreadRef: providerRef(nativeId),
                   ...(needsNewSession
@@ -3761,7 +3393,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             threadState = {
               providerThread,
               activeTurn: null,
-              backgroundSubagents: new Map(),
               supersededSessionFiles: new Set(),
               latestTodoList: null,
             };
@@ -3939,17 +3570,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
         },
         events: Stream.fromQueue(events),
         backgroundTasksEndWithProcess: true,
-        hasPendingBackgroundWork: Effect.sync(
-          () =>
-            pendingWake !== null ||
-            (threadState?.providerThread.pendingBackgroundTasks?.length ?? 0) > 0,
-        ),
+        hasPendingBackgroundWork: Effect.sync(() => pendingWake !== null),
         hasPendingBackgroundWorkForThread: (providerThread) =>
           Effect.sync(
-            () =>
-              (pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id) ||
-              (threadState?.providerThread.id === providerThread.id &&
-                (threadState.providerThread.pendingBackgroundTasks?.length ?? 0) > 0),
+            () => pendingWake !== null && pendingWake.state.providerThread.id === providerThread.id,
           ),
         getModelContextWindow: (selection) => {
           if (selection.instanceId !== options.instanceId) return undefined;
@@ -4261,10 +3885,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (turn === null && interruptInput.requestRuntimeRestart === true) {
               if (pendingWake !== null)
                 yield* sessionEventPermit.withPermits(1)(stopPendingWake(pendingWake));
-              if ((threadState?.providerThread.pendingBackgroundTasks?.length ?? 0) > 0) {
-                stopRequested = true;
-                yield* connection.terminate;
-              }
               return;
             }
             if (turn === null || turn.providerTurn.id !== interruptInput.providerTurnId) {
@@ -4273,7 +3893,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             turn.interrupted = true;
             if (
               interruptInput.requestRuntimeRestart === true ||
-              (threadState?.providerThread.pendingBackgroundTasks?.length ?? 0) > 0 ||
               turn.settleWhenIdle ||
               turn.activeCompaction !== null ||
               turn.manualCompactInFlight ||
@@ -4323,28 +3942,6 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               ),
             ),
         ),
-        // The extension ends the child and reports it through its lifecycle entry.
-        stopSubagent: Effect.fn("PiAdapter.stopSubagent")(function* (stopInput) {
-          const running = [...(threadState?.backgroundSubagents.values() ?? [])].some(
-            (task) =>
-              task.identity.id === stopInput.nativeTaskId && task.subagent.status === "running",
-          );
-          if (!running) return;
-          const result = yield* request({
-            type: "prompt",
-            message: `/${PI_SUBAGENT_STOP_COMMAND} ${stopInput.nativeTaskId}`,
-          }).pipe(
-            Effect.mapError((cause) =>
-              protocolError(`Could not stop Pi subagent ${stopInput.nativeTaskId}`, cause),
-            ),
-          );
-          const disposition = recordString(result, "disposition");
-          if (disposition !== undefined && disposition !== "handled") {
-            return yield* protocolError(
-              `Pi's subagent extension does not provide /${PI_SUBAGENT_STOP_COMMAND}`,
-            );
-          }
-        }),
         respondToRuntimeRequest: Effect.fn("PiAdapter.respondToRuntimeRequest")(
           function* (requestInput) {
             const pending = pendingPrompts.get(String(requestInput.requestId));
@@ -4526,13 +4123,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             if (state.activeTurn !== null) {
               return yield* protocolError("Cannot roll back while a Pi turn is active");
             }
-            if (
-              pendingWake !== null ||
-              (state.providerThread.pendingBackgroundTasks?.length ?? 0) > 0
-            ) {
-              return yield* protocolError(
-                "Cannot roll back while native Pi work is running or awaits a turn",
-              );
+            if (pendingWake !== null) {
+              return yield* protocolError("Cannot roll back while native Pi work awaits a turn");
             }
             const boundary = piForkBoundary(rollbackInput);
             if (boundary.type === "nothing") {
