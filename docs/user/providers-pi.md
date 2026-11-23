@@ -43,9 +43,14 @@ a speed picker with Standard plus those tiers. A chosen tier is sent as the requ
 `service_tier`; Standard sends none and leaves the endpoint's default. Threads
 use Pi's native session files for resume, rollback, and forks within the same Pi instance. Forks
 preserve the native conversation through the selected turn in the destination workspace.
-Switching providers uses portable conversation context. Extension
+Switching providers uses portable conversation context. An extension's `todo_write` tool, taking Claude's TodoWrite shape
+(`{ todos: [{ content, status }] }`), shows as the thread's checklist. Extension
 dialogs appear in the T3 Code composer, and the thread details context window follows Pi's own usage
 reporting while a response streams and after it settles.
+
+In **Plan** mode, Pi gets T3 Code's planning instructions, edits and writes are refused, and other
+tools that are not read-only ask first, even with **Full access**. The turn's final reply appears as
+the proposed plan.
 
 Pi skills appear in the composer's `$` menu. This includes user skills and project skills that Pi
 loads for the current workspace; selecting one uses Pi's native skill expansion.
@@ -64,6 +69,11 @@ T3 Code applies the composer permission mode through Pi's blocking tool hook:
   tools.
 - **Full access** allows tools without T3 Code approval prompts.
 
+Checklist updates from a `todo_write` tool never ask. To let other extension tools you trust run
+without prompts, such as read-only search tools, list their names in the Pi instance's
+`T3_PI_APPROVAL_EXEMPT_TOOLS` environment variable, separated by commas (for example
+`fd,rg,ask_user`). T3 Code does not check what a listed tool does.
+
 The **Auto** option is not shown for Pi because Pi does not expose an AI approval reviewer.
 Threads that already stored Auto before Pi support was added behave and display as Supervised.
 
@@ -75,19 +85,6 @@ T3 Code's `delegate_task` tool creates durable child threads in the shared subag
 installs Pi's example `subagent` extension, T3 Code also shows its task progress and results in that
 UI. Pi runs those children without a session, so they cannot be opened or resumed as T3 Code
 threads.
-
-Background subagent extensions can report lifecycle changes with Pi's
-`appendEntry("t3-subagent", data)`. T3 Code shows these children in the shared Agents view,
-including progress and completion after the parent turn ends. These entries do not start a
-model turn or depend on formatted tool output. Children without T3 Code threads cannot be
-opened or resumed from that view.
-
-The version 1 payload requires `version: 1`, `id`, the originating `toolCallId`, and `status`
-(`running`, `completed`, `failed`, or `interrupted`). The first entry must include `prompt`
-and arrive after that tool call starts in an active T3 turn. Optional `title` and `model`
-identify the child. Later entries reuse its identity and can update `progress` or `result`;
-`null` clears either field. T3 bounds progress to 200 characters and results to 10,000.
-Extensions should limit streaming updates and publish status changes immediately.
 
 ## Troubleshooting
 

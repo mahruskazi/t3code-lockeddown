@@ -1,6 +1,10 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
-import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS,
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { PULL_REQUEST_LINKING_INSTRUCTIONS } from "@t3tools/provider-core/server/runtimeInstructions";
+import { PI_TODO_TOOL } from "./todos.ts";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
 
@@ -9,6 +13,9 @@ export const T3_MCP_BEARER_ENV = "T3_MCP_BEARER_TOKEN";
 export const T3_PI_RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 export const T3_PI_MCP_EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 export const PI_T3_SERVICE_TIER_COMMAND = "t3-service-tier";
+export const PI_T3_INTERACTION_MODE_COMMAND = "t3-interaction-mode";
+// Comma-separated extension tools the operator trusts to run without approval prompts.
+const T3_PI_APPROVAL_EXEMPT_TOOLS_ENV = "T3_PI_APPROVAL_EXEMPT_TOOLS";
 
 // These tools trigger file-change approvals, bypassed by Auto-accept edits.
 export const PI_FILE_CHANGE_TOOLS = ["edit", "write"] as const;
@@ -27,8 +34,13 @@ const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
 const PULL_REQUEST_LINKING_INSTRUCTIONS = ${JSON.stringify(PULL_REQUEST_LINKING_INSTRUCTIONS)};
 const SERVICE_TIER_COMMAND = ${JSON.stringify(PI_T3_SERVICE_TIER_COMMAND)};
+const INTERACTION_MODE_COMMAND = ${JSON.stringify(PI_T3_INTERACTION_MODE_COMMAND)};
+const PLAN_MODE_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ACP_PLAN_MODE_INSTRUCTIONS)};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+// A checklist update only changes what T3 shows.
+const UI_ONLY_TOOLS = new Set([${JSON.stringify(PI_TODO_TOOL)}]);
+const APPROVAL_EXEMPT_TOOLS_ENV = ${JSON.stringify(T3_PI_APPROVAL_EXEMPT_TOOLS_ENV)};
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
 
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
@@ -257,14 +269,33 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // replacement reruns this factory without project_trust, and T3 drops notices outside a turn,
   // so check each session's first turn. An explicit --no-approve is deliberate and stays quiet.
   let projectTrustChecked = false;
-  pi.on("before_agent_start", (_event, ctx) => {
-    if (projectTrustChecked) return;
+  // The composer's Plan mode is per turn; T3 sets it through this command before each turn.
+  let planMode = false;
+  pi.registerCommand(INTERACTION_MODE_COMMAND, {
+    description: "Set the interaction mode T3 Code applies to the next turn",
+    handler: async (args) => {
+      planMode = args.trim() === "plan";
+    },
+  });
+
+  pi.on("before_agent_start", (event, ctx) => {
+    // Without prompt sections, the bridge's instructions hook appends Plan mode instead.
+    let planPrompt: { systemPrompt: string } | undefined;
+    const sections = event.systemPromptOptions?.sections;
+    if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
+      if (planMode) sections.t3_code_interaction_mode = PLAN_MODE_INSTRUCTIONS;
+      else delete sections.t3_code_interaction_mode;
+    } else if (planMode && (env(URL_ENV) === undefined || env(TOKEN_ENV) === undefined)) {
+      planPrompt = { systemPrompt: event.systemPrompt + "\\n\\n" + PLAN_MODE_INSTRUCTIONS };
+    }
+    if (projectTrustChecked) return planPrompt;
     projectTrustChecked = true;
-    if (ctx.isProjectTrusted() || process.argv.some((arg) => arg === "--no-approve" || arg === "-na")) return;
+    if (ctx.isProjectTrusted() || process.argv.some((arg) => arg === "--no-approve" || arg === "-na")) return planPrompt;
     ctx.ui.notify(
       \`Pi did not load project settings, extensions, skills, prompts, MCP servers or system prompt files for \${ctx.cwd} because the folder is not trusted. To load them, run the configured Pi binary there with the same PI_CODING_AGENT_DIR (if set), trust the folder or its parent with /trust, then start a new thread in that same worktree. To trust every project, add --approve to Pi's launch arguments in T3 Code settings; to keep them off without this notice, add --no-approve.\`,
       "warning",
     );
+    return planPrompt;
   });
 
   // Keep skill chips in the request. Pi expands only one leading /skill:
@@ -362,13 +393,26 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       NodePath.resolve(tool.sourceInfo.path) === NodePath.resolve(extensionPath));
   };
 
+  const exemptTools = new Set(
+    (env(APPROVAL_EXEMPT_TOOLS_ENV) ?? "").split(",").map((name) => name.trim()).filter((name) => name.length > 0),
+  );
+
   pi.on("tool_call", async (event, ctx) => {
     const mode = runtimeMode();
-    if (mode === "full-access") return;
-    if ((event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) || isReadOnlyMcpTool(event.toolName)) {
+    if (planMode && FILE_CHANGE_TOOLS.has(event.toolName)) {
+      return { block: true, reason: "T3 Code is in Plan mode: present a plan instead of editing files." };
+    }
+    // Plan mode asks before any other tool that may change something, even in full access.
+    if (mode === "full-access" && !planMode) return;
+    if (
+      (event.toolName === "tool_search" ? hasBuiltinToolSearch() : READ_ONLY_TOOLS.has(event.toolName)) ||
+      UI_ONLY_TOOLS.has(event.toolName) ||
+      exemptTools.has(event.toolName) ||
+      isReadOnlyMcpTool(event.toolName)
+    ) {
       return;
     }
-    if (mode === "auto-accept-edits" && FILE_CHANGE_TOOLS.has(event.toolName)) {
+    if (!planMode && mode === "auto-accept-edits" && FILE_CHANGE_TOOLS.has(event.toolName)) {
       return;
     }
     const approved = await ctx.ui.confirm(
@@ -383,6 +427,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
 
   const endpoint = env(URL_ENV);
   const token = env(TOKEN_ENV);
+
   if (endpoint === undefined || token === undefined) {
     pi.on("session_start", async (_event, ctx) => {
       ctx.ui.notify(
@@ -536,7 +581,8 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       sections.t3_code_orchestration = instructions;
       return undefined;
     }
-    return { systemPrompt: event.systemPrompt + "\\n\\n" + instructions };
+    const planInstructions = planMode ? "\\n\\n" + PLAN_MODE_INSTRUCTIONS : "";
+    return { systemPrompt: event.systemPrompt + "\\n\\n" + instructions + planInstructions };
   });
 }
 `;
