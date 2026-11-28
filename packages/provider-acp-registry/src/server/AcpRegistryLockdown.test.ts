@@ -60,15 +60,18 @@ it.layer(CatalogLayer)("ACP Registry lockdown", (it) => {
       const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
       yield* expectRegistryUnavailable(catalog.search({ query: "devin" }));
       yield* expectRegistryUnavailable(catalog.prepare(prepareInput));
+      yield* expectRegistryUnavailable(catalog.refreshIndex());
       yield* expectRegistryUnavailable(catalog.inspect(registrySettings));
-      yield* expectRegistryUnavailable(catalog.resolve(registrySettings, process.cwd()));
+      yield* expectRegistryUnavailable(
+        catalog.resolve(registrySettings, process.cwd()).pipe(Effect.scoped),
+      );
     }),
   );
 
   it.effect("still resolves an operator-installed local command", () =>
     Effect.gen(function* () {
       const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
-      const resolved = yield* catalog.resolve(localSettings, process.cwd());
+      const resolved = yield* catalog.resolve(localSettings, process.cwd()).pipe(Effect.scoped);
       assert.strictEqual(resolved.distribution, "local");
       assert.strictEqual(resolved.spawn.command, process.execPath);
     }),
